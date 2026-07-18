@@ -20,6 +20,7 @@ cheime-dictionary.workspace = true
 cheime-user-data.workspace = true
 cheime-extension.workspace = true
 cheime-lua.workspace = true
+cheime-tip-core = { path = "../cheime-tip-core" }
 serde.workspace = true
 thiserror.workspace = true
 windows.workspace = true

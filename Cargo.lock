@@ -71,6 +71,7 @@ dependencies = [
  "cheime-pipeline",
  "cheime-protocol",
  "cheime-session",
+ "cheime-tip-core",
  "cheime-user-data",
  "cheime-wire",
  "serde",
