@@ -8,8 +8,10 @@
 //! - Platform action application (TSF edit session helpers — abstracted)
 //! - Named pipe I/O wrappers (pure framing, no platform handles)
 
+pub mod channel;
 pub mod error;
 pub mod pipe;
 
+pub use channel::{DispatchMessage, TipChannel};
 pub use error::PipeError;
 pub use pipe::{PipeReader, PipeWriter};
