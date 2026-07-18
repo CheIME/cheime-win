@@ -4,4 +4,5 @@
 
 pub mod class_factory;
 pub mod exports;
+pub mod key_handler;
 pub mod tip;
