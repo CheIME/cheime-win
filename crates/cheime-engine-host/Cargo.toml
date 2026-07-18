@@ -1,0 +1,25 @@
+[package]
+name = "cheime-engine-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cheime-engine"
+path = "src/main.rs"
+
+[dependencies]
+cheime-model.workspace = true
+cheime-protocol.workspace = true
+cheime-wire.workspace = true
+cheime-pipeline.workspace = true
+cheime-session.workspace = true
+cheime-dictionary.workspace = true
+cheime-user-data.workspace = true
+cheime-extension.workspace = true
+cheime-lua.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+windows.workspace = true

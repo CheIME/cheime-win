@@ -1,0 +1,15 @@
+[package]
+name = "cheime-tip-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cheime-model.workspace = true
+cheime-protocol.workspace = true
+cheime-wire.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+windows.workspace = true

@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/cheime-tip-core",
+    "crates/cheime-tip",
+    "crates/cheime-engine-host",
+    "crates/cheime-installer",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MPL-2.0"
+repository = "https://github.com/cheime/cheime-win"
+
+[workspace.dependencies]
+cheime-model = { path = "cheime-core/crates/cheime-model" }
+cheime-protocol = { path = "cheime-core/crates/cheime-protocol" }
+cheime-wire = { path = "cheime-core/crates/cheime-wire" }
+cheime-pipeline = { path = "cheime-core/crates/cheime-pipeline" }
+cheime-session = { path = "cheime-core/crates/cheime-session" }
+cheime-dictionary = { path = "cheime-core/crates/cheime-dictionary" }
+cheime-user-data = { path = "cheime-core/crates/cheime-user-data" }
+cheime-extension = { path = "cheime-core/crates/cheime-extension" }
+cheime-lua = { path = "cheime-core/crates/cheime-lua" }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+rmp-serde = "1.3"
+sha2 = "0.10"
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
+thiserror = "2.0"
+
+# Windows-specific
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_TextServices",
+    "Win32_UI_Shell",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Registry",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+]}

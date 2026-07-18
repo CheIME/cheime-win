@@ -1,0 +1,18 @@
+[package]
+name = "cheime-tip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "cheime_tip"
+crate-type = ["cdylib"]
+
+[dependencies]
+cheime-tip-core = { path = "../cheime-tip-core" }
+cheime-model.workspace = true
+cheime-protocol.workspace = true
+cheime-wire.workspace = true
+windows.workspace = true
