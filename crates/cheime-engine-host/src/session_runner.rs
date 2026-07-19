@@ -7,7 +7,7 @@
 //!
 //! This is the core per-client loop in the engine host.
 
-use cheime_pipeline::{BuiltinPipeline, InputPipeline};
+use cheime_pipeline::DictPipeline;
 use cheime_protocol::{FrontendMessage, MessageHeader};
 use cheime_session::Session;
 use cheime_tip_core::{PipeError, PipeReader, PipeWriter};
@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[allow(dead_code)]
 pub enum RunnerError {
     #[error("pipe error: {0}")]
     Pipe(#[from] PipeError),
@@ -28,12 +27,11 @@ pub enum RunnerError {
 ///
 /// Reads frames from `reader`, dispatches to `session`, writes responses to `writer`.
 /// Returns when the pipe is disconnected or an unrecoverable error occurs.
-#[allow(dead_code)]
 pub fn run_client_loop<R, W>(
     mut reader: PipeReader<R>,
     mut writer: PipeWriter<W>,
     codec: MessageCodec,
-    pipeline: impl InputPipeline,
+    pipeline: DictPipeline,
     identity: MessageHeader,
 ) -> Result<(), RunnerError>
 where
@@ -48,7 +46,7 @@ where
             Ok(Some(msg)) => Some(msg),
             Ok(None) => {
                 // Need more data — in real named pipe, this means the
-                // caller should retry. For the test loop, we break.
+                // caller should retry. For now, continue polling.
                 continue;
             }
             Err(PipeError::Disconnected) => break,
@@ -72,25 +70,17 @@ where
     Ok(())
 }
 
-/// Create a minimal BuiltinPipeline for testing.
-#[allow(dead_code)]
-pub fn test_pipeline() -> BuiltinPipeline {
-    BuiltinPipeline::new([
-        (String::from("ni"), String::from("你"), 100),
-        (String::from("ni"), String::from("呢"), 50),
-        (String::from("hao"), String::from("好"), 80),
-        (String::from("nihao"), String::from("你好"), 120),
-    ])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheime_dictionary::{CompiledIndex, DictEntry};
     use cheime_model::{
         CORE_PROTOCOL_VERSION, ClientInstanceId, DeploymentGeneration, Key, KeyEvent, KeyState,
         Revision, Sequence, SessionEpoch, SessionId,
     };
-    use cheime_protocol::{EngineMessage, MessageHeader};
+    use cheime_protocol::EngineMessage;
+    use std::io::Cursor;
+    use std::sync::Arc;
 
     fn test_identity() -> MessageHeader {
         MessageHeader {
@@ -102,6 +92,41 @@ mod tests {
             revision: Revision::new(0),
             deployment: DeploymentGeneration::new(1),
         }
+    }
+
+    fn test_pipeline() -> DictPipeline {
+        let entries = vec![
+            DictEntry {
+                text: "你".into(),
+                code: "ni".into(),
+                weight: Some(100),
+                stem: None,
+            },
+            DictEntry {
+                text: "呢".into(),
+                code: "ni".into(),
+                weight: Some(50),
+                stem: None,
+            },
+            DictEntry {
+                text: "好".into(),
+                code: "hao".into(),
+                weight: Some(80),
+                stem: None,
+            },
+            DictEntry {
+                text: "你好".into(),
+                code: "nihao".into(),
+                weight: Some(120),
+                stem: None,
+            },
+        ];
+        let index = CompiledIndex::build(entries, DeploymentGeneration::new(1));
+        DictPipeline::new(Arc::new(index))
+    }
+
+    fn codec() -> MessageCodec {
+        MessageCodec::new(MessageCodec::DEFAULT_MAX)
     }
 
     #[test]
@@ -122,7 +147,6 @@ mod tests {
         let outputs = session.handle(msg).unwrap();
         assert!(!outputs.is_empty());
 
-        // Should contain a PlatformAction (SetPreedit) and a CandidateSnapshot
         let has_preedit = outputs.iter().any(|m| {
             matches!(m, EngineMessage::PlatformAction { action, .. }
                 if matches!(&action.kind, cheime_model::PlatformActionKind::SetPreedit { text, .. } if text == "n"))
@@ -184,7 +208,6 @@ mod tests {
             })
             .unwrap();
 
-        // Should have a commit action
         let commit_action = commit_out.iter().find_map(|m| match m {
             EngineMessage::PlatformAction { action, .. }
                 if matches!(
@@ -214,7 +237,6 @@ mod tests {
             })
             .unwrap();
 
-        // Composition should be cleared
         assert_eq!(session.composition(), "");
     }
 }

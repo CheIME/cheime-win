@@ -61,6 +61,15 @@ impl ClassFactory {
             server_locked: AtomicU32::new(0),
         })
     }
+
+    /// Public wrapper for the vtable method — used by DllGetClassObject.
+    pub fn query_interface(
+        this: *mut ClassFactory,
+        riid: *const GUID,
+        ppv: *mut RawComPtr,
+    ) -> windows::core::HRESULT {
+        unsafe { class_factory_query_interface(this, riid, ppv) }
+    }
 }
 
 unsafe extern "system" fn class_factory_query_interface(

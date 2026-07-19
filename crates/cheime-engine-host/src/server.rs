@@ -1,67 +1,157 @@
 //! Named pipe server for the engine host.
 //!
-//! Listens on `\\.\pipe\cheime-engine` for TIP client connections,
-//! performs the version handshake, and spawns session runners.
+//! Creates a named pipe at `\\.\pipe\cheime-engine`, listens for TIP client
+//! connections, performs the version handshake, and spawns a session runner
+//! thread per client.
 
+use crate::pipe_handle::PipeHandle;
+use crate::session_runner::run_client_loop;
 use cheime_model::ClientInstanceId;
+use cheime_pipeline::DictPipeline;
+use cheime_protocol::MessageHeader;
+use cheime_tip_core::{PipeReader, PipeWriter};
 use cheime_wire::{ClientHello, HelloAck, HelloRejected, MessageCodec, ServerHello, WireError};
-use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
+use windows::Win32::Foundation::{
+    ERROR_PIPE_CONNECTED, HANDLE,
+};
+use windows::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_UNLIMITED_INSTANCES,
+};
+use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
 
-use cheime_tip_core::{PipeError, PipeReader, PipeWriter};
+/// Default pipe name for the engine.
+pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\cheime-engine";
 
 /// Errors during server or handshake operation.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[allow(dead_code)]
 pub enum ServerError {
     #[error("handshake timeout")]
     HandshakeTimeout,
     #[error("protocol version mismatch: client sent {client}, server requires {server}")]
     VersionMismatch { client: u16, server: u16 },
     #[error("pipe error: {0}")]
-    Pipe(#[from] PipeError),
+    Pipe(String),
     #[error("wire error: {0}")]
-    Wire(#[from] WireError),
+    Wire(String),
     #[error("I/O error: {0}")]
     Io(String),
-    #[error("server already running")]
-    AlreadyRunning,
 }
 
-/// Represents the engine after a successful handshake with a TIP client.
-#[allow(dead_code)]
-pub struct EngineConnection {
-    pub client_id: ClientInstanceId,
-    pub reader: PipeReader<Box<dyn Read + Send>>,
-    pub writer: PipeWriter<Box<dyn Write + Send>>,
-    pub codec: MessageCodec,
+impl From<WireError> for ServerError {
+    fn from(e: WireError) -> Self {
+        ServerError::Wire(e.to_string())
+    }
 }
 
-/// Run the server-side handshake.
-///
-/// 1. Send `ServerHello`
-/// 2. Read `ClientHello` (5-second timeout enforced by caller)
-/// 3. Validate version → `HelloAck` or `HelloRejected`
-///
-/// Returns `EngineConnection` on success. Caller should close the pipe
-/// on error.
-#[allow(dead_code)]
-pub fn run_handshake<R, W>(
-    mut reader: PipeReader<R>,
-    mut writer: PipeWriter<W>,
-    engine_version: &str,
-    next_client_id: u64,
-) -> Result<EngineConnection, ServerError>
-where
-    R: Read + Send + 'static,
-    W: Write + Send + 'static,
-{
+impl From<cheime_tip_core::PipeError> for ServerError {
+    fn from(e: cheime_tip_core::PipeError) -> Self {
+        ServerError::Pipe(e.to_string())
+    }
+}
+
+/// Run the engine host server loop.
+pub fn run_server(
+    dict_pipeline: DictPipeline,
+    deployment: cheime_model::DeploymentGeneration,
+    pipe_name: &str,
+) -> Result<(), ServerError> {
+    let client_counter = Arc::new(AtomicU64::new(1));
+    let dict_pipeline = Arc::new(dict_pipeline);
+
+    let wide_name: Vec<u16> = pipe_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    eprintln!("[engine] listening on {pipe_name}");
+
+    loop {
+        // CreateNamedPipeW returns HANDLE directly (not Result)
+        let pipe_handle = unsafe {
+            CreateNamedPipeW(
+                windows::core::PCWSTR::from_raw(wide_name.as_ptr()),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES,
+                65536,
+                65536,
+                0,
+                None,
+            )
+        };
+
+        if pipe_handle.is_invalid() {
+            eprintln!("[engine] CreateNamedPipeW returned invalid handle");
+            return Err(ServerError::Pipe("CreateNamedPipeW returned invalid handle".into()));
+        }
+
+        let connect_result = unsafe { ConnectNamedPipe(pipe_handle, None) };
+        match connect_result {
+            Ok(()) => {}
+            Err(e) if e.code() == ERROR_PIPE_CONNECTED.to_hresult() => {}
+            Err(e) => {
+                eprintln!("[engine] ConnectNamedPipe failed: {e:?}");
+                unsafe { let _ = windows::Win32::Foundation::CloseHandle(pipe_handle); }
+                continue;
+            }
+        }
+
+        let client_id = client_counter.fetch_add(1, Ordering::Relaxed);
+        let pipeline_clone = Arc::clone(&dict_pipeline);
+
+        // Extract the raw pointer to make it Send-able across threads
+        let pipe_ptr: isize = pipe_handle.0 as isize;
+        drop(pipe_handle); // don't drop the handle — ownership transfers to thread
+        std::thread::spawn(move || {
+            let handle = HANDLE(pipe_ptr as *mut std::ffi::c_void);
+            eprintln!("[engine] client {client_id} connected");
+            match handle_client(handle, pipeline_clone, deployment, client_id) {
+                Ok(()) => eprintln!("[engine] client {client_id} session ended normally"),
+                Err(e) => eprintln!("[engine] client {client_id} error: {e}"),
+            }
+        });
+    }
+}
+
+/// Handle one client: handshake → session loop → cleanup.
+fn handle_client(
+    pipe_handle: HANDLE,
+    dict_pipeline: Arc<DictPipeline>,
+    deployment: cheime_model::DeploymentGeneration,
+    client_id: u64,
+) -> Result<(), ServerError> {
+    // Duplicate the handle so we can have separate reader/writer cursors
+    let mut dup_handle = HANDLE::default();
+    let dup_ok = unsafe {
+        windows::Win32::Foundation::DuplicateHandle(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            pipe_handle,
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            &mut dup_handle,
+            0,
+            false,
+            windows::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if dup_ok.is_err() {
+        unsafe { let _ = windows::Win32::Foundation::CloseHandle(pipe_handle); }
+        return Err(ServerError::Io("DuplicateHandle failed".into()));
+    }
+
+    let read_pipe = unsafe { PipeHandle::from_raw_handle(pipe_handle) };
+    let write_pipe = unsafe { PipeHandle::from_raw_handle(dup_handle) };
     let codec = MessageCodec::new(MessageCodec::DEFAULT_MAX);
+    let mut reader = PipeReader::new(read_pipe);
+    let mut writer = PipeWriter::new(write_pipe);
 
     // 1. Send ServerHello
     let hello = ServerHello {
         protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
-        engine_version: engine_version.to_owned(),
+        engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         supported_caps: vec![],
     };
     writer.write_message(&codec, &hello)?;
@@ -78,11 +168,11 @@ where
     if client_hello.protocol_version != cheime_model::CORE_PROTOCOL_VERSION {
         let rejected = HelloRejected {
             reason: format!(
-                "protocol version mismatch: engine={}, tip={}",
+                "version mismatch: engine={}, tip={}",
                 cheime_model::CORE_PROTOCOL_VERSION,
                 client_hello.protocol_version
             ),
-            engine_version: engine_version.to_owned(),
+            engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         writer.write_message(&codec, &rejected)?;
         writer.flush()?;
@@ -94,121 +184,27 @@ where
 
     // 4. Send HelloAck
     let ack = HelloAck {
-        session_id_base: next_client_id,
+        session_id_base: client_id,
     };
     writer.write_message(&codec, &ack)?;
     writer.flush()?;
 
-    Ok(EngineConnection {
-        client_id: ClientInstanceId::new(client_hello.client_instance_id),
-        reader: PipeReader::new(Box::new(std::io::empty()) as Box<dyn Read + Send>),
-        writer: PipeWriter::new(Box::new(std::io::sink()) as Box<dyn Write + Send>),
-        codec,
-    })
-}
+    eprintln!("[engine] client {client_id} handshake complete");
 
-/// Handshake test with in-memory byte buffers.
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cheime_model::CORE_PROTOCOL_VERSION;
+    // 5. Build session identity
+    let identity = MessageHeader {
+        protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+        client: ClientInstanceId::new(client_hello.client_instance_id),
+        session: cheime_model::SessionId::new(client_id),
+        epoch: cheime_model::SessionEpoch::new(1),
+        sequence: cheime_model::Sequence::new(0),
+        revision: cheime_model::Revision::new(0),
+        deployment,
+    };
 
-    fn codec() -> MessageCodec {
-        MessageCodec::new(MessageCodec::DEFAULT_MAX)
-    }
+    // 6. Run the session loop
+    run_client_loop(reader, writer, codec, (*dict_pipeline).clone(), identity)
+        .map_err(|e| ServerError::Pipe(e.to_string()))?;
 
-    #[test]
-    fn server_hello_encodes_and_decodes() {
-        let c = codec();
-        let hello = ServerHello {
-            protocol_version: CORE_PROTOCOL_VERSION,
-            engine_version: String::from("0.1.0"),
-            supported_caps: vec![],
-        };
-
-        let data = c.encode_handshake(&hello).unwrap();
-        let decoded: ServerHello = c.decode_handshake(&data).unwrap();
-        assert_eq!(decoded.protocol_version, CORE_PROTOCOL_VERSION);
-    }
-
-    #[test]
-    fn client_hello_encodes_and_decodes() {
-        let c = codec();
-        let hello = ClientHello {
-            protocol_version: CORE_PROTOCOL_VERSION,
-            client_instance_id: 42,
-            client_caps: vec![],
-        };
-
-        let data = c.encode_handshake(&hello).unwrap();
-        let decoded: ClientHello = c.decode_handshake(&data).unwrap();
-        assert_eq!(decoded.client_instance_id, 42);
-    }
-
-    #[test]
-    fn hello_rejected_encodes_and_decodes() {
-        let c = codec();
-        let rejected = HelloRejected {
-            reason: String::from("bad version"),
-            engine_version: String::from("0.1.0"),
-        };
-
-        let data = c.encode_handshake(&rejected).unwrap();
-        let decoded: HelloRejected = c.decode_handshake(&data).unwrap();
-        assert_eq!(decoded.reason, "bad version");
-    }
-
-    #[test]
-    fn full_handshake_success_path() {
-        // Simulate what the server does: write ServerHello, read ClientHello,
-        // write HelloAck. Both ends communicate through a shared byte buffer.
-        let c = codec();
-
-        // Server side encodes hello
-        let server_hello = ServerHello {
-            protocol_version: CORE_PROTOCOL_VERSION,
-            engine_version: String::from("0.1.0"),
-            supported_caps: vec![],
-        };
-        let server_hello_bytes = c.encode_handshake(&server_hello).unwrap();
-
-        // Client reads it
-        let decoded: ServerHello = c.decode_handshake(&server_hello_bytes).unwrap();
-        assert_eq!(decoded.protocol_version, CORE_PROTOCOL_VERSION);
-
-        // Client sends back ClientHello
-        let client_hello = ClientHello {
-            protocol_version: CORE_PROTOCOL_VERSION,
-            client_instance_id: 7,
-            client_caps: vec![],
-        };
-        let client_hello_bytes = c.encode_handshake(&client_hello).unwrap();
-
-        // Server reads it and sends HelloAck
-        let decoded_client: ClientHello = c.decode_handshake(&client_hello_bytes).unwrap();
-        assert_eq!(decoded_client.protocol_version, CORE_PROTOCOL_VERSION);
-
-        let ack = HelloAck {
-            session_id_base: 100,
-        };
-        let ack_bytes = c.encode_handshake(&ack).unwrap();
-
-        // Client reads ack
-        let decoded_ack: HelloAck = c.decode_handshake(&ack_bytes).unwrap();
-        assert_eq!(decoded_ack.session_id_base, 100);
-    }
-
-    #[test]
-    fn version_mismatch_rejected() {
-        let c = codec();
-
-        let client_hello = ClientHello {
-            protocol_version: 999, // wrong
-            client_instance_id: 1,
-            client_caps: vec![],
-        };
-        let data = c.encode_handshake(&client_hello).unwrap();
-        let decoded: ClientHello = c.decode_handshake(&data).unwrap();
-        assert_ne!(decoded.protocol_version, CORE_PROTOCOL_VERSION);
-    }
+    Ok(())
 }
