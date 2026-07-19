@@ -109,12 +109,7 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
 // ── Registration Helpers ────────────────────────────────────────
 
 fn register_tip() -> Result<(), String> {
-    // Find the DLL path
     let dll_path = get_dll_path()?;
-    let dll_path_wide: Vec<u16> = dll_path
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
 
     // 1. Register CLSID → InprocServer32
     let clsid_path = format!("CLSID\\{CHEIME_TIP_CLSID_STR}");

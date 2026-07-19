@@ -141,11 +141,20 @@ unsafe extern "system" fn class_factory_create_instance(
         }
         S_OK
     } else {
-        unsafe {
-            let _ = Box::from_raw(tip_ptr);
-            *ppv = std::ptr::null_mut();
+        // Try TSF-specific IIDs from our vtable registry
+        if crate::tsf_interfaces::get_vtable_for_iid(unsafe { &*riid }).is_some() {
+            unsafe {
+                tip_ptr.as_mut().unwrap().add_ref();
+                *ppv = tip_ptr.cast();
+            }
+            S_OK
+        } else {
+            unsafe {
+                let _ = Box::from_raw(tip_ptr);
+                *ppv = std::ptr::null_mut();
+            }
+            E_NOINTERFACE
         }
-        E_NOINTERFACE
     }
 }
 
