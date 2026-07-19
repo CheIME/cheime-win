@@ -15,8 +15,8 @@ cd D:\coding\cheime\cheime-win
 .\scripts\build.ps1
 .\scripts\install.ps1
 
-# 启动引擎
-%LOCALAPPDATA%\CheIME\bin\cheime-engine.exe --dict-dir %LOCALAPPDATA%\CheIME\data\dicts
+# 启动引擎（PowerShell）
+& "$env:LOCALAPPDATA\CheIME\bin\cheime-engine.exe" --dict-dir "$env:LOCALAPPDATA\CheIME\data\dicts"
 ```
 
 ## 方法2：手动部署
@@ -93,7 +93,7 @@ Windows Registry Editor Version 5.00
 ### 步骤5：启动引擎
 
 ```powershell
-%LOCALAPPDATA%\CheIME\bin\cheime-engine.exe --dict-dir %LOCALAPPDATA%\CheIME\data\dicts
+& "$env:LOCALAPPDATA\CheIME\bin\cheime-engine.exe" --dict-dir "$env:LOCALAPPDATA\CheIME\data\dicts"
 ```
 
 ### 步骤6：切换输入法
