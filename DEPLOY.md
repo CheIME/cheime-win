@@ -29,6 +29,7 @@ cargo build --release
 ```
 
 产物在 `target\release\`:
+
 - `cheime-engine.exe` — 引擎进程
 - `cheime_tip.dll` — TIP COM DLL  
 - `cheime-installer.exe` — 安装工具
@@ -48,6 +49,7 @@ copy -Force data\dicts\*                        "$dst\data\dicts\"
 ### 步骤3：注册 TIP DLL
 
 **方案A — regsvr32（推荐）**：
+
 ```powershell
 cd "$env:LOCALAPPDATA\CheIME\bin"
 regsvr32.exe cheime-tip.dll
