@@ -339,6 +339,13 @@ fn register_profile() -> windows::core::Result<()> {
                 PROFILE_LANGUAGE_ID,
                 &GUID_PROFILE,
                 BOOL(1),
+            )?;
+            // ActivateLanguageProfile pins the profile into the user's
+            // keyboard layout list so it appears under Win+Space.
+            profiles.ActivateLanguageProfile(
+                &CLSID_CHEIME_TIP,
+                PROFILE_LANGUAGE_ID,
+                &GUID_PROFILE,
             )
         }
     })
