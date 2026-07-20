@@ -5,6 +5,7 @@
 
 use crate::edit_session::request_edit_session;
 use crate::io_thread::{WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
+use crate::tsf_interfaces::tsf_log;
 use cheime_model::{CandidateSnapshot, PlatformAction};
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::layout::{ROW_PADDING_X, ROW_PADDING_Y, layout_snapshot};
@@ -205,6 +206,11 @@ unsafe extern "system" fn candidate_window_proc(
                 if lparam.0 != 0 {
                     let boxed: Box<CandidateSnapshot> =
                         Box::from_raw(lparam.0 as *mut CandidateSnapshot);
+                    tsf_log(&format!(
+                        "[CheIME] WM_SNAPSHOT preedit={} candidates={}",
+                        boxed.preedit,
+                        boxed.candidates.len()
+                    ));
                     let rows = build_rows(&boxed, LINE_HEIGHT);
                     let ctx_ptr = GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0))
                         as *const WindowContext;
@@ -213,6 +219,17 @@ unsafe extern "system" fn candidate_window_proc(
                             *st = Some((*boxed, rows));
                         }
                     }
+                    // Auto-position and show the window near the caret
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        100, // x — TODO: get actual caret position
+                        200, // y — TODO: get actual caret position
+                        0,
+                        0,
+                        SWP_NOACTIVATE | SWP_NOSIZE,
+                    );
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     let _ = InvalidateRect(hwnd, None, true);
                 }
                 LRESULT(0)
@@ -221,6 +238,7 @@ unsafe extern "system" fn candidate_window_proc(
                 if lparam.0 != 0 {
                     let action: Box<PlatformAction> =
                         Box::from_raw(lparam.0 as *mut PlatformAction);
+                    tsf_log(&format!("[CheIME] WM_ACTION action={action:?}"));
                     let ctx_ptr = GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0))
                         as *const WindowContext;
                     if !ctx_ptr.is_null() {
@@ -242,9 +260,13 @@ unsafe extern "system" fn candidate_window_proc(
                 LRESULT(0)
             }
             WM_CHEIME_STATUS => {
-                // No-op for now; status could update a tray icon or log.
                 if lparam.0 != 0 {
-                    let _ = Box::from_raw(lparam.0 as *mut (bool, String));
+                    let status: Box<(bool, String)> =
+                        Box::from_raw(lparam.0 as *mut (bool, String));
+                    tsf_log(&format!(
+                        "[CheIME] WM_STATUS connected={} detail={}",
+                        status.0, status.1
+                    ));
                 }
                 LRESULT(0)
             }

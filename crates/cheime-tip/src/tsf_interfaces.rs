@@ -31,7 +31,7 @@ use windows::Win32::UI::TextServices::{
 use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
 /// Write a diagnostic line to %TEMP%\cheime-tsf.log.
-fn tsf_log(msg: &str) {
+pub fn tsf_log(msg: &str) {
     use std::io::Write;
     use std::sync::Mutex;
     static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
@@ -598,6 +598,10 @@ unsafe extern "system" fn key_event(
                         control: is_ctrl,
                         alt: is_alt,
                     };
+                    tsf_log(&format!(
+                        "[CheIME] KeyDown vk={key_code:#04x} key={key:?} mode={:?}",
+                        unsafe { (*owner).mode.get() }
+                    ));
                     let _ = channel.try_send(FrontendMessage::KeyCommand {
                         header: cheime_protocol::MessageHeader {
                             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,

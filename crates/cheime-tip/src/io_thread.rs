@@ -3,6 +3,7 @@
 //! 2. Performs the client handshake
 //! 3. Runs a read/write loop
 
+use crate::tsf_interfaces::tsf_log;
 use cheime_model::{CandidateSnapshot, PlatformAction};
 use cheime_protocol::{EngineMessage, FrontendMessage};
 use cheime_tip_core::{PipeError, PipeReader, PipeWriter};
@@ -141,9 +142,15 @@ fn io_thread_main(
                     }
                     match msg {
                         EngineMessage::CandidateSnapshot { snapshot, .. } => {
+                            tsf_log(&format!(
+                                "[CheIME] IO snapshot preedit={} candidates={}",
+                                snapshot.preedit,
+                                snapshot.candidates.len()
+                            ));
                             post_snapshot(hwnd, &snapshot);
                         }
                         EngineMessage::PlatformAction { action, .. } => {
+                            tsf_log(&format!("[CheIME] IO action={action:?}"));
                             post_action(hwnd, &action);
                         }
                         _ => {}
