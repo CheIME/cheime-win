@@ -8,3 +8,6 @@
 # OS
 Thumbs.db
 .DS_Store
+
+# Claude worktrees
+.claude/worktrees/
