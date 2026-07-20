@@ -28,6 +28,8 @@ pub const GUID_PROFILE: GUID = GUID::from_u128(0xD7E2A3B4_C5F6_7890_ABCD_EF12345
 pub const GUID_TFCAT_TIP_KEYBOARD: GUID = GUID::from_u128(0x34745C63_B2F0_4784_8B67_5E12C8701A31);
 pub const CLSID_TF_INPUTPROCESSORPROFILES: GUID =
     GUID::from_u128(0x33C53A50_F456_4884_B049_85FD643ECFED);
+pub const CLSID_TF_CATEGORY_MGR: GUID =
+    GUID::from_u128(0xA4B544A1_438D_4B41_9325_869523E2D6C7);
 pub const PROFILE_LANGUAGE_ID: u16 = 0x0804;
 pub const PROFILE_ENABLED: bool = true;
 
@@ -342,7 +344,22 @@ fn register_profile() -> windows::core::Result<()> {
             )?;
             // ActivateLanguageProfile pins the profile into the user's
             // keyboard layout list so it appears under Win+Space.
-            profiles.ActivateLanguageProfile(&CLSID_CHEIME_TIP, PROFILE_LANGUAGE_ID, &GUID_PROFILE)
+            profiles.ActivateLanguageProfile(
+                &CLSID_CHEIME_TIP,
+                PROFILE_LANGUAGE_ID,
+                &GUID_PROFILE,
+            )?;
+            // Register this TIP as a Keyboard category input processor.
+            // Without this, TSF does not consider it a keyable input method.
+            let category_mgr: windows::Win32::UI::TextServices::ITfCategoryMgr =
+                unsafe { CoCreateInstance(&CLSID_TF_CATEGORY_MGR, None, CLSCTX_INPROC_SERVER) }?;
+            unsafe {
+                category_mgr.RegisterCategory(
+                    &CLSID_CHEIME_TIP,
+                    &GUID_TFCAT_TIP_KEYBOARD,
+                    &CLSID_CHEIME_TIP,
+                )
+            }
         }
     })
 }
