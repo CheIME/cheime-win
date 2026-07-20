@@ -21,7 +21,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::ITfInputProcessorProfileMgr;
-use windows::core::{GUID, HRESULT, PCWSTR};
+use windows::core::{GUID, HRESULT, Interface, PCWSTR};
 
 pub const CLSID_CHEIME_TIP: GUID = GUID::from_u128(0xB5F1C9A8_3E7D_4A15_AE2D_F89C1B6E3A07);
 pub const GUID_PROFILE: GUID = GUID::from_u128(0xD7E2A3B4_C5F6_7890_ABCD_EF1234567890);
@@ -324,6 +324,20 @@ fn register_profile() -> windows::core::Result<()> {
                 0,
                 BOOL(PROFILE_ENABLED as i32),
                 0,
+            )?;
+        }
+        // RegisterProfile only makes the profile known system-wide.
+        // EnableLanguageProfile activates it for the current user so it
+        // appears as a usable input method (not just in the candidate list).
+        // This method lives on ITfInputProcessorProfiles, reached via QI
+        // from the same CLSID_TF_INPUTPROCESSORPROFILES coclass.
+        let profiles: windows::Win32::UI::TextServices::ITfInputProcessorProfiles = manager.cast()?;
+        unsafe {
+            profiles.EnableLanguageProfile(
+                &CLSID_CHEIME_TIP,
+                PROFILE_LANGUAGE_ID,
+                &GUID_PROFILE,
+                BOOL(1),
             )
         }
     })
