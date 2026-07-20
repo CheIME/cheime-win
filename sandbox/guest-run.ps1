@@ -30,7 +30,7 @@ function Invoke-RegSvr32 {
     if ($Action -eq 'unregister') { $args += '/u' }
     $args += '/s'
     $args += $DllPath
-    Write-Host "[guest] regsvr32 $Action: $DllPath"
+    Write-Host "[guest] regsvr32 ${Action}: $DllPath"
     $proc = Start-Process -FilePath "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList $args -Wait -PassThru -NoNewWindow
     if ($proc.ExitCode -ne 0) {
         throw "regsvr32 $Action failed (exit $($proc.ExitCode))"

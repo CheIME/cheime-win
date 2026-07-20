@@ -82,11 +82,14 @@ Copy-Item -Force (Join-Path $repoRoot "data\dicts\*") $dataDir
 
 # Copy guest scripts
 $sandboxDir = Join-Path $repoRoot "sandbox"
-if (Test-Path (Join-Path $sandboxDir "guest-run.ps1")) {
-    Copy-Item -Force (Join-Path $sandboxDir "guest-run.ps1") (Join-Path $bundleDir "guest-run.ps1")
+foreach ($guestScript in @("guest-run.ps1", "run.bat")) {
+    $src = Join-Path $sandboxDir $guestScript
+    if (Test-Path $src) {
+        Copy-Item -Force $src (Join-Path $bundleDir $guestScript)
+    }
 }
-if (Test-Path (Join-Path $sandboxDir "CheIME.wsb")) {
-    Copy-Item -Force (Join-Path $sandboxDir "CheIME.wsb") (Join-Path $bundleDir "CheIME.wsb")
+if (Test-Path (Join-Path $sandboxDir "CheIME.wsb.template")) {
+    Copy-Item -Force (Join-Path $sandboxDir "CheIME.wsb.template") (Join-Path $bundleDir "CheIME.wsb.template")
 }
 
 # Verify staged bundle

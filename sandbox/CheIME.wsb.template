@@ -6,6 +6,6 @@
     </MappedFolder>
   </MappedFolders>
   <LogonCommand>
-    <Command>powershell -NoExit -ExecutionPolicy Bypass -Command "$env:CHEIME_DISPOSABLE_GUEST=1; &amp; 'C:\Users\WDAGUtilityAccount\Desktop\__BUNDLE_FOLDER__\guest-run.ps1'"</Command>
+    <Command>C:\Users\WDAGUtilityAccount\Desktop\__BUNDLE_FOLDER__\run.bat</Command>
   </LogonCommand>
 </Configuration>
