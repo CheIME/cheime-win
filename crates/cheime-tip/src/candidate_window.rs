@@ -355,11 +355,7 @@ fn build_rows(snapshot: &CandidateSnapshot, line_height: i32) -> Vec<RowRender> 
     let mut rows = Vec::new();
     let mut y = ROW_PADDING_Y;
     if !layout.preedit.is_empty() {
-        let t: Vec<u16> = layout
-            .preedit
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let t: Vec<u16> = layout.preedit.encode_utf16().collect();
         rows.push(RowRender {
             text: t,
             y,
@@ -381,7 +377,7 @@ fn build_rows(snapshot: &CandidateSnapshot, line_height: i32) -> Vec<RowRender> 
         } else {
             s = row.text.clone();
         }
-        let t: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+        let t: Vec<u16> = s.encode_utf16().collect();
         rows.push(RowRender {
             text: t,
             y,

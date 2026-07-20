@@ -22,6 +22,9 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
+// Re-export tsf_log from parent module for use in edit session tracing.
+use crate::tsf_interfaces::tsf_log;
+
 pub const S_OK: HRESULT = HRESULT(0);
 pub const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
 pub const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
@@ -146,24 +149,33 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
         None => return S_OK,
     };
     match &data.action.kind {
-        PlatformActionKind::Commit { text } => handle_commit(
-            ec,
-            &data.context,
-            text,
-            data.channel,
-            data.composition,
-            &data.action,
-        ),
-        PlatformActionKind::SetPreedit { text, cursor } => handle_set_preedit(
-            ec,
-            &data.context,
-            text,
-            *cursor,
-            data.channel,
-            data.composition,
-            &data.action,
-        ),
+        PlatformActionKind::Commit { text } => {
+            tsf_log(&format!("[CheIME] edit: Commit text={text:?}"));
+            handle_commit(
+                ec,
+                &data.context,
+                text,
+                data.channel,
+                data.composition,
+                &data.action,
+            )
+        }
+        PlatformActionKind::SetPreedit { text, cursor } => {
+            tsf_log(&format!(
+                "[CheIME] edit: SetPreedit text={text:?} cursor={cursor}"
+            ));
+            handle_set_preedit(
+                ec,
+                &data.context,
+                text,
+                *cursor,
+                data.channel,
+                data.composition,
+                &data.action,
+            )
+        }
         PlatformActionKind::CancelComposition => {
+            tsf_log("[CheIME] edit: CancelComposition");
             handle_cancel_composition(ec, data.composition, data.channel, &data.action)
         }
     }

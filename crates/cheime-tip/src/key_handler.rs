@@ -36,6 +36,7 @@ pub fn check_key(
     is_shift: bool,
     is_ctrl: bool,
     is_alt: bool,
+    has_composition: bool,
 ) -> KeyAdmission {
     if !cheime_activated {
         // CheIME not active: only mode-toggle shortcut is accepted
@@ -58,12 +59,20 @@ pub fn check_key(
             }
             KeyAdmission::PassThrough
         }
-        InputMode::Chinese => chinese_mode_keys(key_code, is_shift, is_ctrl, is_alt),
+        InputMode::Chinese => {
+            chinese_mode_keys(key_code, is_shift, is_ctrl, is_alt, has_composition)
+        }
     }
 }
 
 /// Key admission for Chinese input mode.
-fn chinese_mode_keys(key_code: u32, is_shift: bool, is_ctrl: bool, is_alt: bool) -> KeyAdmission {
+fn chinese_mode_keys(
+    key_code: u32,
+    is_shift: bool,
+    is_ctrl: bool,
+    is_alt: bool,
+    has_composition: bool,
+) -> KeyAdmission {
     // Ctrl+Space / Shift+Space: toggle mode
     if (is_ctrl || is_shift) && !is_alt && key_code == 0x20 {
         return KeyAdmission::ToggleMode;
@@ -83,8 +92,14 @@ fn chinese_mode_keys(key_code: u32, is_shift: bool, is_ctrl: bool, is_alt: bool)
             KeyAdmission::Handled
         }
 
-        // Backspace: handled
-        0x08 => KeyAdmission::Handled,
+        // Backspace: only handled when there is composition text
+        0x08 => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // Enter: handled
         0x0D => KeyAdmission::Handled,
@@ -95,11 +110,8 @@ fn chinese_mode_keys(key_code: u32, is_shift: bool, is_ctrl: bool, is_alt: bool)
         // Space: handled (select candidate or commit)
         0x20 => KeyAdmission::Handled,
 
-        // Digits 0-9: handled (candidate selection)
-        0x30..=0x39 => KeyAdmission::Handled,
-
-        // Numpad digits 0-9: handled
-        0x60..=0x69 => KeyAdmission::Handled,
+        // Digits 0-9 and numpad digits: candidate selection — NOT sent to engine
+        0x30..=0x39 | 0x60..=0x69 => KeyAdmission::PassThrough,
 
         // + and -: page up/down
         0xBB | 0x6B => KeyAdmission::Handled, // =/+
@@ -142,15 +154,31 @@ mod tests {
     #[test]
     fn not_activated_passes_through_most_keys() {
         assert_eq!(
-            check_key(InputMode::Chinese, false, VK_A, false, false, false),
+            check_key(InputMode::Chinese, false, VK_A, false, false, false, false),
             KeyAdmission::PassThrough
         );
         assert_eq!(
-            check_key(InputMode::Chinese, false, VK_RETURN, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                false,
+                VK_RETURN,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::PassThrough
         );
         assert_eq!(
-            check_key(InputMode::Chinese, false, VK_SPACE, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                false,
+                VK_SPACE,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::PassThrough
         );
     }
@@ -158,11 +186,27 @@ mod tests {
     #[test]
     fn ctrl_space_toggles_even_when_not_activated() {
         assert_eq!(
-            check_key(InputMode::Direct, false, VK_SPACE, false, true, false),
+            check_key(
+                InputMode::Direct,
+                false,
+                VK_SPACE,
+                false,
+                true,
+                false,
+                false
+            ),
             KeyAdmission::ToggleMode
         );
         assert_eq!(
-            check_key(InputMode::Chinese, false, VK_SPACE, false, true, false),
+            check_key(
+                InputMode::Chinese,
+                false,
+                VK_SPACE,
+                false,
+                true,
+                false,
+                false
+            ),
             KeyAdmission::ToggleMode
         );
     }
@@ -171,11 +215,19 @@ mod tests {
     fn shift_space_toggles_when_activated() {
         // Shift+Space toggles when CheIME is activated
         assert_eq!(
-            check_key(InputMode::Direct, true, VK_SPACE, true, false, false),
+            check_key(InputMode::Direct, true, VK_SPACE, true, false, false, false),
             KeyAdmission::ToggleMode
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_SPACE, true, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_SPACE,
+                true,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::ToggleMode
         );
     }
@@ -183,11 +235,11 @@ mod tests {
     #[test]
     fn direct_mode_passes_through_letters() {
         assert_eq!(
-            check_key(InputMode::Direct, true, VK_A, false, false, false),
+            check_key(InputMode::Direct, true, VK_A, false, false, false, false),
             KeyAdmission::PassThrough
         );
         assert_eq!(
-            check_key(InputMode::Direct, true, VK_Z, false, false, false),
+            check_key(InputMode::Direct, true, VK_Z, false, false, false, false),
             KeyAdmission::PassThrough
         );
     }
@@ -195,41 +247,83 @@ mod tests {
     #[test]
     fn chinese_mode_handles_letters() {
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_A, false, false, false),
+            check_key(InputMode::Chinese, true, VK_A, false, false, false, false),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_Z, false, false, false),
+            check_key(InputMode::Chinese, true, VK_Z, false, false, false, false),
             KeyAdmission::Handled
         );
     }
 
     #[test]
     fn chinese_mode_handles_special_keys() {
+        // Backspace is handled when composition exists
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_BACK, false, false, false),
+            check_key(InputMode::Chinese, true, VK_BACK, false, false, false, true),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_RETURN, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_RETURN,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_ESCAPE, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_ESCAPE,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_SPACE, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_SPACE,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::Handled
         );
     }
 
     #[test]
+    fn backspace_passes_through_when_no_composition() {
+        assert_eq!(
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_BACK,
+                false,
+                false,
+                false,
+                false
+            ),
+            KeyAdmission::PassThrough
+        );
+    }
+
+    #[test]
     fn chinese_mode_handles_digits() {
+        // Digits now pass-through to avoid crashing engine (candidate selection in TIP layer)
         for vk in VK_0..=VK_9 {
             assert_eq!(
-                check_key(InputMode::Chinese, true, vk, false, false, false),
-                KeyAdmission::Handled
+                check_key(InputMode::Chinese, true, vk, false, false, false, false),
+                KeyAdmission::PassThrough
             );
         }
     }
@@ -237,19 +331,43 @@ mod tests {
     #[test]
     fn chinese_mode_handles_page_and_arrows() {
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_PRIOR, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_PRIOR,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_NEXT, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_NEXT,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_UP, false, false, false),
+            check_key(InputMode::Chinese, true, VK_UP, false, false, false, false),
             KeyAdmission::Handled
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_DOWN, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_DOWN,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::Handled
         );
     }
@@ -257,11 +375,27 @@ mod tests {
     #[test]
     fn chinese_mode_passes_through_left_right() {
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_LEFT, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_LEFT,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::PassThrough
         );
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_RIGHT, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_RIGHT,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::PassThrough
         );
     }
@@ -270,12 +404,12 @@ mod tests {
     fn ctrl_combos_pass_through() {
         // Ctrl+C should pass through (copy)
         assert_eq!(
-            check_key(InputMode::Chinese, true, 0x43, false, true, false),
+            check_key(InputMode::Chinese, true, 0x43, false, true, false, false),
             KeyAdmission::PassThrough
         );
         // Ctrl+V should pass through (paste)
         assert_eq!(
-            check_key(InputMode::Chinese, true, 0x56, false, true, false),
+            check_key(InputMode::Chinese, true, 0x56, false, true, false, false),
             KeyAdmission::PassThrough
         );
     }
@@ -284,7 +418,7 @@ mod tests {
     fn alt_combos_pass_through() {
         // Alt+F should pass through
         assert_eq!(
-            check_key(InputMode::Chinese, true, 0x46, false, false, true),
+            check_key(InputMode::Chinese, true, 0x46, false, false, true, false),
             KeyAdmission::PassThrough
         );
     }
@@ -293,12 +427,12 @@ mod tests {
     fn unknown_keys_pass_through() {
         // F1
         assert_eq!(
-            check_key(InputMode::Chinese, true, 0x70, false, false, false),
+            check_key(InputMode::Chinese, true, 0x70, false, false, false, false),
             KeyAdmission::PassThrough
         );
         // Tab
         assert_eq!(
-            check_key(InputMode::Chinese, true, 0x09, false, false, false),
+            check_key(InputMode::Chinese, true, 0x09, false, false, false, false),
             KeyAdmission::PassThrough
         );
     }

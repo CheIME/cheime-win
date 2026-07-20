@@ -102,6 +102,7 @@ pub struct ComTip {
     io_thread: RefCell<Option<IoThread>>,
     candidate_window: RefCell<Option<CandidateWindow>>,
     mode: Cell<InputMode>,
+    has_composition: Cell<bool>,
 }
 
 impl ComTip {
@@ -125,6 +126,7 @@ impl ComTip {
             io_thread: RefCell::new(None),
             candidate_window: RefCell::new(None),
             mode: Cell::new(InputMode::Chinese),
+            has_composition: Cell::new(false),
         })
     }
 
@@ -576,12 +578,12 @@ unsafe extern "system" fn test_key(
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
-            (*owner).mode.get()
+            ((*owner).mode.get(), (*owner).has_composition.get())
         }))
     }) {
-        Some(Some((activated, mode))) => {
-            check_key(mode, activated, key_code, is_shift, is_ctrl, is_alt)
-        }
+        Some(Some((activated, (mode, has_comp)))) => check_key(
+            mode, activated, key_code, is_shift, is_ctrl, is_alt, has_comp,
+        ),
         _ => KeyAdmission::PassThrough,
     };
 
@@ -611,12 +613,12 @@ unsafe extern "system" fn key_down(
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
-            (*owner).mode.get()
+            ((*owner).mode.get(), (*owner).has_composition.get())
         }))
     }) {
-        Some(Some((activated, mode))) => {
-            check_key(mode, activated, key_code, is_shift, is_ctrl, is_alt)
-        }
+        Some(Some((activated, (mode, has_comp)))) => check_key(
+            mode, activated, key_code, is_shift, is_ctrl, is_alt, has_comp,
+        ),
         _ => KeyAdmission::PassThrough,
     };
 
@@ -658,6 +660,9 @@ unsafe extern "system" fn key_down(
                     InputMode::Direct => InputMode::Chinese,
                 })
             };
+            tsf_log(&format!("[CheIME] ToggleMode → {:?}", unsafe {
+                (*owner).mode.get()
+            }));
             unsafe { *eaten = BOOL(1) };
             S_OK
         }
