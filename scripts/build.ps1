@@ -82,7 +82,7 @@ Copy-Item -Force (Join-Path $repoRoot "data\dicts\*") $dataDir
 
 # Copy guest scripts
 $sandboxDir = Join-Path $repoRoot "sandbox"
-foreach ($guestScript in @("guest-run.ps1", "run.bat", "diagnose.ps1")) {
+foreach ($guestScript in @("guest-run.ps1", "run.bat", "diagnose.ps1", "enable-sandbox.bat")) {
     $src = Join-Path $sandboxDir $guestScript
     if (Test-Path $src) {
         Copy-Item -Force $src (Join-Path $bundleDir $guestScript)
