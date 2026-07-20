@@ -331,7 +331,8 @@ fn register_profile() -> windows::core::Result<()> {
         // appears as a usable input method (not just in the candidate list).
         // This method lives on ITfInputProcessorProfiles, reached via QI
         // from the same CLSID_TF_INPUTPROCESSORPROFILES coclass.
-        let profiles: windows::Win32::UI::TextServices::ITfInputProcessorProfiles = manager.cast()?;
+        let profiles: windows::Win32::UI::TextServices::ITfInputProcessorProfiles =
+            manager.cast()?;
         unsafe {
             profiles.EnableLanguageProfile(
                 &CLSID_CHEIME_TIP,

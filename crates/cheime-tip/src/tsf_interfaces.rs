@@ -30,6 +30,26 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
+/// Write a diagnostic line to %TEMP%\cheime-tsf.log.
+fn tsf_log(msg: &str) {
+    use std::io::Write;
+    use std::sync::Mutex;
+    static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    if let Ok(mut guard) = LOG.lock() {
+        if guard.is_none() {
+            let path = std::env::temp_dir().join("cheime-tsf-log.txt");
+            *guard = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok();
+        }
+        if let Some(ref mut file) = *guard {
+            let _ = writeln!(file, "{}", msg);
+        }
+    }
+}
+
 pub const S_OK: HRESULT = HRESULT(0);
 pub const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
 pub const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
@@ -339,9 +359,16 @@ unsafe extern "system" fn activate_ex(
         state.begin_activation(client_id)
     }) {
         Some(Some(token)) => token,
-        Some(None) => return TF_E_ALREADY_EXISTS,
-        None => return E_NOINTERFACE,
+        Some(None) => {
+            tsf_log("[CheIME] TF_E_ALREADY_EXISTS");
+            return TF_E_ALREADY_EXISTS;
+        }
+        None => {
+            tsf_log("[CheIME] E_NOINTERFACE (wrong thread)");
+            return E_NOINTERFACE;
+        }
     };
+    tsf_log(&format!("[CheIME] ActivateEx client_id={client_id}"));
 
     let manager = unsafe { ITfThreadMgr::from_raw_borrowed(&thread_mgr) }
         .expect("non-null ITfThreadMgr")
@@ -462,6 +489,7 @@ unsafe extern "system" fn activate_ex(
         Ok(Err(resources)) | Err(resources) => Some(resources),
     };
     if let Some(resources) = rejected {
+        tsf_log("[CheIME] complete_activation REJECTED");
         rollback_before_drop(
             resources,
             |resources| {
@@ -473,6 +501,8 @@ unsafe extern "system" fn activate_ex(
         );
         return E_NOINTERFACE;
     }
+
+    tsf_log("[CheIME] ActivateEx ACCEPTED");
 
     // --- I/O and candidate window startup ---
     let mut channel = TipChannel::new(64);
