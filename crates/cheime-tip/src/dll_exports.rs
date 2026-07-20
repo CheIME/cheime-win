@@ -93,6 +93,7 @@ struct UnregistrationPlan {
 fn registration_plan(dll_path: &str) -> RegistrationPlan {
     // Write CLSID under HKLM\SOFTWARE\Classes (not HKCR) so COM can find
     // the DLL in this 64-bit process and low-integrity contexts.
+    // Use "C:\Program Files\CheIME" as the canonical install root.
     let clsid_path = format!("SOFTWARE\\Classes\\CLSID\\{CLSID_TEXT}");
     let inproc_path = format!("{clsid_path}\\InprocServer32");
     let metadata_path = format!(
@@ -585,8 +586,9 @@ mod tests {
     #[test]
     fn registration_rolls_back_all_registration_surfaces_after_failure() {
         let mut executor = FakeExecutor::failing_at(4);
-        let error = register_with_executor(&mut executor, r"C:\CheIME\cheime-tip.dll")
-            .expect_err("profile failure must fail registration");
+        let error =
+            register_with_executor(&mut executor, r"C:\Program Files\CheIME\cheime-tip.dll")
+                .expect_err("profile failure must fail registration");
         assert_eq!(error.code(), HRESULT(0x8000_4005u32 as i32));
         assert_eq!(executor.operations.len(), 8);
         assert_eq!(executor.operations[4], RecordedOperation::RegisterProfile);
