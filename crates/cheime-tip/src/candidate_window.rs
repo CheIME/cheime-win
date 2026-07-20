@@ -13,18 +13,18 @@ use std::sync::Mutex;
 use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOWTEXT, CreateFontW,
-    DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor,
-    HDC, InvalidateRect, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkColor,
-    SetBkMode, SetTextColor, TRANSPARENT, TextOutW, UpdateWindow,
+    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontW,
+    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE,
+    FW_NORMAL, GetSysColor, HBRUSH, HDC, InvalidateRect, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, TextOutW, UpdateWindow,
 };
 use windows::Win32::UI::TextServices::{ITfComposition, ITfThreadMgr};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST,
     RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const CANDIDATE_WINDOW_CLASS: &str = "CheIME_CandidateWindow";
@@ -75,7 +75,9 @@ impl CandidateWindow {
             cbWndExtra: 0,
             hIcon: Default::default(),
             hCursor: Default::default(),
-            hbrBackground: Default::default(),
+            hbrBackground: HBRUSH(
+                unsafe { CreateSolidBrush(COLORREF(GetSysColor(COLOR_WINDOW))) }.0,
+            ),
             lpszMenuName: windows::core::PCWSTR::null(),
         };
         unsafe { RegisterClassW(&wc) };
@@ -185,6 +187,10 @@ unsafe extern "system" fn candidate_window_proc(
     unsafe {
         match msg {
             WM_CREATE => LRESULT(0),
+            WM_ERASEBKGND => {
+                // Let DefWindowProc handle background erasing with hbrBackground
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);

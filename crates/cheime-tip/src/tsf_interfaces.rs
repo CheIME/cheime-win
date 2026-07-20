@@ -556,7 +556,9 @@ static TIP_VTBL: ITfTextInputProcessorEx_Vtbl = ITfTextInputProcessorEx_Vtbl {
 unsafe extern "system" fn key_focus(_: *mut c_void, _: BOOL) -> HRESULT {
     S_OK
 }
-unsafe extern "system" fn key_event(
+/// `OnTestKeyDown` / `OnTestKeyUp` — check whether CheIME handles this key
+/// without producing side effects (no state mutation, no engine messages).
+unsafe extern "system" fn test_key(
     this: *mut c_void,
     _: *mut c_void,
     wparam: WPARAM,
@@ -568,24 +570,54 @@ unsafe extern "system" fn key_event(
     }
     let owner = unsafe { owner_from_key(this) };
     let key_code = wparam.0 as u32;
-
-    // Determine modifier state via GetKeyState (real-time, not from lparam flags)
     let is_shift = unsafe { GetKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetKeyState(0x11) } < 0;
     let is_alt = unsafe { GetKeyState(0x12) } < 0;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
-        state.key_admission_enabled()
+        Some((state.key_admission_enabled(), unsafe {
+            (*owner).mode.get()
+        }))
     }) {
-        Some(activated) => check_key(
-            unsafe { (*owner).mode.get() },
-            activated,
-            key_code,
-            is_shift,
-            is_ctrl,
-            is_alt,
-        ),
-        None => KeyAdmission::PassThrough,
+        Some(Some((activated, mode))) => {
+            check_key(mode, activated, key_code, is_shift, is_ctrl, is_alt)
+        }
+        _ => KeyAdmission::PassThrough,
+    };
+
+    match admission {
+        KeyAdmission::Handled | KeyAdmission::ToggleMode => unsafe { *eaten = BOOL(1) },
+        KeyAdmission::PassThrough => unsafe { *eaten = BOOL(0) },
+    }
+    S_OK
+}
+
+/// `OnKeyDown` — actually process the key (send to engine, toggle mode, etc.).
+unsafe extern "system" fn key_down(
+    this: *mut c_void,
+    _: *mut c_void,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+    eaten: *mut BOOL,
+) -> HRESULT {
+    if this.is_null() || eaten.is_null() {
+        return E_POINTER;
+    }
+    let owner = unsafe { owner_from_key(this) };
+    let key_code = wparam.0 as u32;
+    let is_shift = unsafe { GetKeyState(0x10) } < 0;
+    let is_ctrl = unsafe { GetKeyState(0x11) } < 0;
+    let is_alt = unsafe { GetKeyState(0x12) } < 0;
+
+    let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
+        Some((state.key_admission_enabled(), unsafe {
+            (*owner).mode.get()
+        }))
+    }) {
+        Some(Some((activated, mode))) => {
+            check_key(mode, activated, key_code, is_shift, is_ctrl, is_alt)
+        }
+        _ => KeyAdmission::PassThrough,
     };
 
     match admission {
@@ -599,7 +631,7 @@ unsafe extern "system" fn key_event(
                         alt: is_alt,
                     };
                     tsf_log(&format!(
-                        "[CheIME] KeyDown vk={key_code:#04x} key={key:?} mode={:?}",
+                        "[CheIME] OnKeyDown vk={key_code:#04x} key={key:?} mode={:?}",
                         unsafe { (*owner).mode.get() }
                     ));
                     let _ = channel.try_send(FrontendMessage::KeyCommand {
@@ -634,6 +666,21 @@ unsafe extern "system" fn key_event(
             S_OK
         }
     }
+}
+
+/// `OnKeyUp` — always pass through (we already handled the key on `OnKeyDown`).
+unsafe extern "system" fn key_up(
+    _this: *mut c_void,
+    _: *mut c_void,
+    _wparam: WPARAM,
+    _lparam: LPARAM,
+    eaten: *mut BOOL,
+) -> HRESULT {
+    if eaten.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *eaten = BOOL(0) };
+    S_OK
 }
 
 /// Convert a Windows virtual key code to a `Key` for protocol messages.
@@ -676,10 +723,10 @@ unsafe extern "system" fn preserved_key(
 static KEY_VTBL: ITfKeyEventSink_Vtbl = ITfKeyEventSink_Vtbl {
     base__: unknown_vtbl(key_qi, key_add_ref, key_release),
     OnSetFocus: key_focus,
-    OnTestKeyDown: key_event,
-    OnTestKeyUp: key_event,
-    OnKeyDown: key_event,
-    OnKeyUp: key_event,
+    OnTestKeyDown: test_key,
+    OnTestKeyUp: test_key,
+    OnKeyDown: key_down,
+    OnKeyUp: key_up,
     OnPreservedKey: preserved_key,
 };
 
@@ -1138,6 +1185,8 @@ mod tests {
     fn all_key_callbacks_remain_transparent() {
         let _guard = test_counter_guard();
         let owner = Box::into_raw(ComTip::new());
+        // Deactivate to make key admission PassThrough for all callbacks.
+        unsafe { (*owner).runtime.get_mut().deactivate() };
         let key = unsafe { ComTip::interface(owner, &IID_KEY).unwrap() };
         for callback in [
             KEY_VTBL.OnTestKeyDown,
@@ -1167,7 +1216,7 @@ mod tests {
         let owner = Box::into_raw(ComTip::new());
         let key = unsafe { ComTip::interface(owner, &IID_KEY).unwrap() };
         assert_eq!(
-            unsafe { key_event(key, null_mut(), WPARAM(0), LPARAM(0), null_mut()) },
+            unsafe { test_key(key, null_mut(), WPARAM(0), LPARAM(0), null_mut()) },
             E_POINTER
         );
         assert_eq!(
