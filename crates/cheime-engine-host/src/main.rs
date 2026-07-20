@@ -91,7 +91,10 @@ fn main() {
 
     let generation = dict_handle.generation();
     let total = dict_handle.index().total_entries;
-    eprintln!("Loaded {total} dictionary entries (generation {})", generation.get());
+    eprintln!(
+        "Loaded {total} dictionary entries (generation {})",
+        generation.get()
+    );
 
     let index = Arc::new(dict_handle.index().clone());
     let pipeline = DictPipeline::new(index);

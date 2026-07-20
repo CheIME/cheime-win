@@ -19,12 +19,15 @@ impl PipeHandle {
         Self { inner: owned }
     }
 
-    pub fn raw_handle(&self) -> RawHandle {
-        self.inner.as_raw_handle()
+    pub fn set_blocking(&self, blocking: bool) -> io::Result<()> {
+        use windows::Win32::System::Pipes::{PIPE_NOWAIT, PIPE_WAIT, SetNamedPipeHandleState};
+        let mode = if blocking { PIPE_WAIT } else { PIPE_NOWAIT };
+        unsafe { SetNamedPipeHandleState(self.as_hvalue(), Some(&mode), None, None) }
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     fn as_hvalue(&self) -> HANDLE {
-        HANDLE(self.inner.as_raw_handle() as *mut std::ffi::c_void)
+        HANDLE(self.inner.as_raw_handle())
     }
 }
 
@@ -42,13 +45,21 @@ impl io::Read for PipeHandle {
             Ok(()) if bytes_read == 0 => Ok(0), // EOF (pipe closed)
             Ok(()) => Ok(bytes_read as usize),
             Err(e) => {
-                let code = windows::core::HRESULT::from(e.code());
-                if code == windows::core::HRESULT::from(windows::Win32::Foundation::ERROR_BROKEN_PIPE)
-                    || code == windows::core::HRESULT::from(windows::Win32::Foundation::ERROR_NO_DATA)
+                let code = e.code();
+                if code
+                    == windows::core::HRESULT::from(windows::Win32::Foundation::ERROR_BROKEN_PIPE)
+                    || code
+                        == windows::core::HRESULT::from(windows::Win32::Foundation::ERROR_NO_DATA)
                 {
-                    Ok(0) // EOF
+                    if code
+                        == windows::core::HRESULT::from(windows::Win32::Foundation::ERROR_NO_DATA)
+                    {
+                        Err(io::Error::from(io::ErrorKind::WouldBlock))
+                    } else {
+                        Ok(0) // EOF
+                    }
                 } else {
-                    Err(io::Error::new(io::ErrorKind::Other, e.to_string()))
+                    Err(io::Error::other(e.to_string()))
                 }
             }
         }
@@ -67,16 +78,29 @@ impl io::Write for PipeHandle {
             )
         } {
             Ok(()) => Ok(bytes_written as usize),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => Err(io::Error::other(e.to_string())),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let _ = unsafe {
-            windows::Win32::Storage::FileSystem::FlushFileBuffers(self.as_hvalue())
-        };
-        Ok(())
+        unsafe { windows::Win32::Storage::FileSystem::FlushFileBuffers(self.as_hvalue()) }
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 }
 
 unsafe impl Send for PipeHandle {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::io::FromRawHandle;
+
+    #[test]
+    fn flush_propagates_invalid_handle_error() {
+        let invalid = unsafe {
+            OwnedHandle::from_raw_handle(windows::Win32::Foundation::INVALID_HANDLE_VALUE.0)
+        };
+        let mut pipe = PipeHandle { inner: invalid };
+        assert!(io::Write::flush(&mut pipe).is_err());
+    }
+}

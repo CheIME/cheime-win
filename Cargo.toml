@@ -4,6 +4,7 @@ members = [
     "crates/cheime-tip",
     "crates/cheime-engine-host",
     "crates/cheime-installer",
+    "crates/cheime-probe",
 ]
 resolver = "3"
 

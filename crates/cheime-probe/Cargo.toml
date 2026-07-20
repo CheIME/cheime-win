@@ -1,0 +1,23 @@
+[package]
+name = "cheime-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cheime-probe"
+path = "main.rs"
+
+[[bin]]
+name = "cheime-registered-probe"
+path = "registered.rs"
+
+[[bin]]
+name = "cheime-profile-probe"
+path = "profile.rs"
+
+[dependencies]
+windows.workspace = true
+sha2.workspace = true

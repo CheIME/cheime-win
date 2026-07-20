@@ -15,4 +15,5 @@ cheime-tip-core = { path = "../cheime-tip-core" }
 cheime-model.workspace = true
 cheime-protocol.workspace = true
 cheime-wire.workspace = true
+serde.workspace = true
 windows.workspace = true

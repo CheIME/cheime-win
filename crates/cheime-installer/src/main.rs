@@ -16,8 +16,8 @@ fn main() {
     let command = args.get(1).map(String::as_str).unwrap_or("status");
 
     match command {
-        "install" => cmd_install(),
-        "uninstall" => cmd_uninstall(),
+        "install" => fail_with_script("install.ps1"),
+        "uninstall" => fail_with_script("uninstall.ps1"),
         "status" => cmd_status(),
         other => {
             eprintln!("unknown command: {other}");
@@ -27,60 +27,10 @@ fn main() {
     }
 }
 
-fn cmd_install() {
-    println!("CheIME Installer v0.1.0 — install");
-    println!();
-
-    // 1. Ensure CheIME directories exist
-    let local_app_data = get_local_app_data();
-    let cheime_dir = format!("{local_app_data}\\{CHEIME_DIR}");
-    let bin_dir = format!("{cheime_dir}\\bin");
-    let data_dir = format!("{cheime_dir}\\data\\dicts");
-    let config_dir = format!("{cheime_dir}\\config");
-
-    println!("Creating directories...");
-    for dir in [&bin_dir, &data_dir, &config_dir] {
-        println!("  {dir}");
-        // In the real tool: std::fs::create_dir_all(dir)
-    }
-
-    // 2. Register TIP DLLs (x64 and x86)
-    println!();
-    println!("Registering TIP DLLs...");
-    println!("  CLSID: {CHEIME_TIP_CLSID}");
-    println!("  x64: {bin_dir}\\cheime-tip-x64.dll");
-    println!("  x86: {bin_dir}\\cheime-tip-x86.dll");
-
-    // Real: LoadLibrary + DllRegisterServer for each bitness
-
-    // 3. Register TSF profile
-    println!();
-    println!("Registering TSF profile...");
-    println!("  Language: zh-CN (0x0804)");
-    println!("  Category: GUID_TFCAT_TIP_KEYBOARD");
-
-    println!();
-    println!("Install complete.");
-}
-
-fn cmd_uninstall() {
-    println!("CheIME Installer v0.1.0 — uninstall");
-    println!();
-
-    // 1. Unregister TSF profile
-    println!("Unregistering TSF profile...");
-
-    // 2. Unregister TIP DLLs
-    let local_app_data = get_local_app_data();
-    let bin_dir = format!("{local_app_data}\\{CHEIME_DIR}\\bin");
-    println!("Unregistering TIP DLLs...");
-    println!("  {bin_dir}\\cheime-tip-x64.dll");
-    println!("  {bin_dir}\\cheime-tip-x86.dll");
-
-    // Real: LoadLibrary + DllUnregisterServer
-
-    println!();
-    println!("Uninstall complete.");
+fn fail_with_script(script: &str) -> ! {
+    eprintln!("This command does not perform deployment.");
+    eprintln!(r"Run the administrator PowerShell script instead: scripts\{script}");
+    std::process::exit(2);
 }
 
 fn cmd_status() {

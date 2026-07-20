@@ -1,4 +1,8 @@
 //! TIP instance — the text input processor object.
+//!
+//! COM layout: the first pointer-sized field is `vtbl_ptr`, pointing to the
+//! active vtable. This is how COM dispatches method calls.
+//! Other COM state follows the vtable pointer.
 
 use crate::exports::increment_object_count;
 use crate::key_handler::{InputMode, KeyAdmission, check_key};
@@ -10,7 +14,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::TextServices::ITfThreadMgr;
 
+#[repr(C)]
 pub struct CheimeTip {
+    /// COM vtable pointer — MUST be first for COM dispatch.
+    pub vtbl_ptr: *const std::ffi::c_void,
     pub ref_count: AtomicU32,
     pub mode: Cell<InputMode>,
     pub activated: bool,
@@ -25,6 +32,7 @@ impl CheimeTip {
     pub fn new() -> Box<Self> {
         increment_object_count();
         Box::new(Self {
+            vtbl_ptr: std::ptr::null(), // set by class_factory after creation
             ref_count: AtomicU32::new(1),
             mode: Cell::new(InputMode::Chinese),
             activated: false,
@@ -141,4 +149,5 @@ mod tests {
     #[test] fn handle_key_passes_through_when_not_handled() { let mut t = CheimeTip::new(); t.activate(); assert!(!t.handle_key(0x70, false, false, false)); }
     #[test] fn vk_to_key_conversion() { assert_eq!(vk_to_key(0x41), Key::Character('a')); assert_eq!(vk_to_key(0x30), Key::Character('0')); }
     #[test] fn handle_key_toggle_mode_actually_switches() { let mut t = CheimeTip::new(); t.activate(); t.handle_key(0x20, true, false, false); assert_eq!(t.mode.get(), InputMode::Direct); }
+    #[test] fn tip_vtbl_ptr_is_first_field() { let t = CheimeTip::new(); let ptr: *const CheimeTip = &*t; let vtbl_addr = &t.vtbl_ptr as *const _ as usize; let struct_addr = ptr as usize; assert_eq!(vtbl_addr, struct_addr); }
 }

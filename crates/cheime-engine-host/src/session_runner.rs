@@ -41,30 +41,18 @@ where
     let mut session = Session::new(identity, pipeline);
 
     loop {
-        // Read the next frontend message
-        let msg: Option<FrontendMessage> = match reader.try_read_frame(&codec) {
-            Ok(Some(msg)) => Some(msg),
-            Ok(None) => {
-                // Need more data — in real named pipe, this means the
-                // caller should retry. For now, continue polling.
-                continue;
-            }
-            Err(PipeError::Disconnected) => break,
-            Err(e) => return Err(RunnerError::Pipe(e)),
+        let Some(msg): Option<FrontendMessage> = reader.read_message(&codec)? else {
+            break;
         };
 
-        if let Some(msg) = msg {
-            // Feed to session
-            let outputs = session
-                .handle(msg)
-                .map_err(|e| RunnerError::Session(e.to_string()))?;
+        let outputs = session
+            .handle(msg)
+            .map_err(|e| RunnerError::Session(e.to_string()))?;
 
-            // Write each engine message back
-            for out in outputs {
-                writer.write_message(&codec, &out)?;
-            }
-            writer.flush()?;
+        for out in outputs {
+            writer.write_message(&codec, &out)?;
         }
+        writer.flush()?;
     }
 
     Ok(())
@@ -79,7 +67,6 @@ mod tests {
         Revision, Sequence, SessionEpoch, SessionId,
     };
     use cheime_protocol::EngineMessage;
-    use std::io::Cursor;
     use std::sync::Arc;
 
     fn test_identity() -> MessageHeader {
@@ -123,10 +110,6 @@ mod tests {
         ];
         let index = CompiledIndex::build(entries, DeploymentGeneration::new(1));
         DictPipeline::new(Arc::new(index))
-    }
-
-    fn codec() -> MessageCodec {
-        MessageCodec::new(MessageCodec::DEFAULT_MAX)
     }
 
     #[test]

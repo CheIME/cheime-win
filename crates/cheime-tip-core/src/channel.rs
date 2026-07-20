@@ -33,6 +33,11 @@ impl TipChannel {
         self.sender.try_send(msg)
     }
 
+    /// Clone the underlying `SyncSender` for use from window callbacks.
+    pub fn clone_sender(&self) -> mpsc::SyncSender<FrontendMessage> {
+        self.sender.clone()
+    }
+
     /// Take the receiver half of the channel.
     ///
     /// Returns `None` if already taken. The receiver should be moved
