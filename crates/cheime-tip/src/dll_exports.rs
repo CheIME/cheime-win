@@ -16,8 +16,8 @@ use windows::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::ITfInputProcessorProfileMgr;
@@ -43,6 +43,7 @@ const CLASS_E_CLASSNOTAVAILABLE: HRESULT = HRESULT(0x8004_0111u32 as i32);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegistryHive {
+    #[allow(dead_code)]
     ClassesRoot,
     LocalMachine,
 }
@@ -90,22 +91,24 @@ struct UnregistrationPlan {
 }
 
 fn registration_plan(dll_path: &str) -> RegistrationPlan {
-    let clsid_path = format!("CLSID\\{CLSID_TEXT}");
+    // Write CLSID under HKLM\SOFTWARE\Classes (not HKCR) so COM can find
+    // the DLL in this 64-bit process and low-integrity contexts.
+    let clsid_path = format!("SOFTWARE\\Classes\\CLSID\\{CLSID_TEXT}");
     let inproc_path = format!("{clsid_path}\\InprocServer32");
     let metadata_path = format!(
         "SOFTWARE\\Microsoft\\CTF\\TIP\\{CLSID_TEXT}\\LanguageProfile\\0x00000804\\{PROFILE_TEXT}"
     );
     RegistrationPlan {
         registry_writes: vec![
-            RegistryWrite::string(RegistryHive::ClassesRoot, &inproc_path, None, dll_path),
+            RegistryWrite::string(RegistryHive::LocalMachine, &inproc_path, None, dll_path),
             RegistryWrite::string(
-                RegistryHive::ClassesRoot,
+                RegistryHive::LocalMachine,
                 &inproc_path,
                 Some("ThreadingModel"),
                 "Apartment",
             ),
             RegistryWrite::key(
-                RegistryHive::ClassesRoot,
+                RegistryHive::LocalMachine,
                 &format!("{clsid_path}\\Implemented Categories\\{CATEGORY_TEXT}"),
             ),
             RegistryWrite::string(
@@ -122,8 +125,8 @@ fn unregistration_plan() -> UnregistrationPlan {
     UnregistrationPlan {
         registry_deletes: vec![
             RegistryDelete {
-                hive: RegistryHive::ClassesRoot,
-                path: format!("CLSID\\{CLSID_TEXT}"),
+                hive: RegistryHive::LocalMachine,
+                path: format!("SOFTWARE\\Classes\\CLSID\\{CLSID_TEXT}"),
             },
             RegistryDelete {
                 hive: RegistryHive::LocalMachine,
@@ -443,10 +446,8 @@ fn registry_status(status: WIN32_ERROR) -> windows::core::Result<()> {
 }
 
 fn native_hive(hive: RegistryHive) -> HKEY {
-    match hive {
-        RegistryHive::ClassesRoot => HKEY_CLASSES_ROOT,
-        RegistryHive::LocalMachine => HKEY_LOCAL_MACHINE,
-    }
+    let _ = hive;
+    HKEY_LOCAL_MACHINE
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -632,8 +633,8 @@ mod tests {
         assert_eq!(
             plan.registry_writes[0],
             RegistryWrite::string(
-                RegistryHive::ClassesRoot,
-                r"CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\InprocServer32",
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Classes\CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\InprocServer32",
                 None,
                 r"C:\Program Files\CheIME\cheime-tip.dll",
             )
@@ -641,8 +642,8 @@ mod tests {
         assert_eq!(
             plan.registry_writes[1],
             RegistryWrite::string(
-                RegistryHive::ClassesRoot,
-                r"CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\InprocServer32",
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Classes\CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\InprocServer32",
                 Some("ThreadingModel"),
                 "Apartment",
             )
@@ -650,8 +651,8 @@ mod tests {
         assert_eq!(
             plan.registry_writes[2],
             RegistryWrite::key(
-                RegistryHive::ClassesRoot,
-                r"CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\Implemented Categories\{34745C63-B2F0-4784-8B67-5E12C8701A31}",
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Classes\CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\Implemented Categories\{34745C63-B2F0-4784-8B67-5E12C8701A31}",
             )
         );
         assert_eq!(
@@ -663,11 +664,11 @@ mod tests {
                 "CheIME TIP",
             )
         );
+        // No writes use HKEY_CLASSES_ROOT — use explicit HKLM paths.
         assert!(
             plan.registry_writes
                 .iter()
-                .all(|write| write.hive != RegistryHive::ClassesRoot
-                    || !write.path.starts_with("SOFTWARE\\Microsoft\\CTF"))
+                .all(|write| write.hive == RegistryHive::LocalMachine)
         );
     }
 
@@ -677,8 +678,8 @@ mod tests {
             unregistration_plan().registry_deletes,
             vec![
                 RegistryDelete {
-                    hive: RegistryHive::ClassesRoot,
-                    path: r"CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}".into(),
+                    hive: RegistryHive::LocalMachine,
+                    path: r"SOFTWARE\Classes\CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}".into(),
                 },
                 RegistryDelete {
                     hive: RegistryHive::LocalMachine,
