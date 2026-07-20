@@ -250,15 +250,26 @@ unsafe extern "system" fn candidate_window_proc(
                     if !ctx_ptr.is_null() {
                         let ctx = &*ctx_ptr;
                         // Get focused context from thread manager
-                        if let Ok(doc) = ctx.thread_mgr.GetFocus() {
-                            if let Ok(context) = doc.GetTop() {
-                                request_edit_session(
-                                    ctx.client_id,
-                                    &context,
-                                    *action,
-                                    &ctx.channel as *const SyncSender<FrontendMessage>,
-                                    &ctx.composition as *const Mutex<Option<ITfComposition>>,
-                                );
+                        match ctx.thread_mgr.GetFocus() {
+                            Ok(doc) => match doc.GetTop() {
+                                Ok(context) => {
+                                    tsf_log(
+                                        "[CheIME] WM_ACTION: got context, requesting edit session",
+                                    );
+                                    request_edit_session(
+                                        ctx.client_id,
+                                        &context,
+                                        *action,
+                                        &ctx.channel as *const SyncSender<FrontendMessage>,
+                                        &ctx.composition as *const Mutex<Option<ITfComposition>>,
+                                    );
+                                }
+                                Err(e) => {
+                                    tsf_log(&format!("[CheIME] WM_ACTION: GetTop failed: {e:?}"))
+                                }
+                            },
+                            Err(e) => {
+                                tsf_log(&format!("[CheIME] WM_ACTION: GetFocus failed: {e:?}"))
                             }
                         }
                     }
@@ -273,6 +284,10 @@ unsafe extern "system" fn candidate_window_proc(
                         "[CheIME] WM_STATUS connected={} detail={}",
                         status.0, status.1
                     ));
+                    // Hide when engine disconnects; let snapshot handler re-show.
+                    if !status.0 {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
                 }
                 LRESULT(0)
             }
@@ -298,6 +313,8 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender]) {
     let hl_bg = COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHT) });
     let hl_fg = COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHTTEXT) });
     unsafe {
+        // Use Microsoft YaHei for CJK text rendering; fall back to system default.
+        let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
         let font = CreateFontW(
             FONT_HEIGHT,
             0,
@@ -312,7 +329,7 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender]) {
             0,
             DEFAULT_QUALITY.0 as u32,
             FF_DONTCARE.0 as u32 | DEFAULT_CHARSET.0 as u32,
-            None,
+            windows::core::PCWSTR::from_raw(face.as_ptr()),
         );
         let old = SelectObject(hdc, font);
         for row in rows {
