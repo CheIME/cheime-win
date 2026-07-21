@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext,
     ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink,
@@ -576,9 +576,9 @@ unsafe extern "system" fn test_key(
     }
     let owner = unsafe { owner_from_key(this) };
     let key_code = wparam.0 as u32;
-    let is_shift = unsafe { GetKeyState(0x10) } < 0;
-    let is_ctrl = unsafe { GetKeyState(0x11) } < 0;
-    let is_alt = unsafe { GetKeyState(0x12) } < 0;
+    let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
+    let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
+    let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
     let ctrl_space = key_code == 0x20 && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
@@ -618,9 +618,9 @@ unsafe extern "system" fn key_down(
     }
     let owner = unsafe { owner_from_key(this) };
     let key_code = wparam.0 as u32;
-    let is_shift = unsafe { GetKeyState(0x10) } < 0;
-    let is_ctrl = unsafe { GetKeyState(0x11) } < 0;
-    let is_alt = unsafe { GetKeyState(0x12) } < 0;
+    let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
+    let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
+    let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
     let ctrl_space = key_code == 0x20 && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
