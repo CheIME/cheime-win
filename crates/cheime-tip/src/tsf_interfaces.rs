@@ -637,6 +637,14 @@ unsafe extern "system" fn key_down(
                 } else {
                     key_code - 0x30
                 };
+                // digit_idx: 0='0', 1='1', ..., 9='9'
+                // 1 → select first candidate (index 0)
+                // 0 → select tenth candidate (index 9)
+                let candidate_offset = if digit_idx == 0 {
+                    9
+                } else {
+                    (digit_idx as usize).saturating_sub(1)
+                };
                 let ctx_ref: *const WindowContext = {
                     let cw = unsafe { (*owner).candidate_window.try_borrow() };
                     match cw.as_ref() {
@@ -655,7 +663,7 @@ unsafe extern "system" fn key_down(
                     let action = if let Ok(st) = ctx.snapshot.lock() {
                         st.as_ref().and_then(|(snap, _)| {
                             snap.candidates
-                                .get(digit_idx as usize)
+                                .get(candidate_offset)
                                 .map(|cand| PlatformAction {
                                     id: cheime_model::ActionId::new(0),
                                     epoch: snap.epoch,
@@ -670,9 +678,8 @@ unsafe extern "system" fn key_down(
                     };
                     if let Some(action) = action {
                         tsf_log(&format!(
-                            "[CheIME] Digit{} commit: {:?}",
-                            digit_idx + 1,
-                            action.kind
+                            "[CheIME] Digit{} commit (offset={}): {:?}",
+                            digit_idx, candidate_offset, action.kind
                         ));
                         if let Ok(doc) = ctx.thread_mgr.GetFocus() {
                             if let Ok(context) = doc.GetTop() {
