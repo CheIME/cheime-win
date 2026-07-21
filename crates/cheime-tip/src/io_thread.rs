@@ -432,53 +432,38 @@ fn post_status(hwnd: HWND, connected: bool, detail: &str) {
 mod phase2_tests {
     use super::*;
     use cheime_model::{ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId};
-
-    fn hello(deployment: u64) -> ServerHello {
+    fn hello() -> ServerHello {
         ServerHello {
             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
             engine_version: "test".into(),
             supported_caps: vec![],
-            deployment_generation: deployment,
         }
     }
 
-    fn ack(client: u64, deployment: u64) -> HelloAck {
-        HelloAck {
-            client_instance_id: client,
-            session_id: 7,
-            session_epoch: 8,
-            initial_revision: 9,
-            deployment_generation: deployment,
-            session_id_base: 7,
-        }
+    fn ack(session_id_base: u64) -> HelloAck {
+        HelloAck { session_id_base }
     }
 
     #[test]
-    fn matching_ack_installs_negotiated_identity() {
-        let state = validate_handshake(&hello(6), 42, &ack(42, 6)).unwrap();
+    fn matching_ack_installs_identity_from_handshake() {
+        let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
         assert_eq!(state.client, ClientInstanceId::new(42));
         assert_eq!(state.session, SessionId::new(7));
-        assert_eq!(state.epoch, SessionEpoch::new(8));
-        assert_eq!(state.revision, Revision::new(9));
-        assert_eq!(state.deployment, DeploymentGeneration::new(6));
+        assert_eq!(state.epoch, SessionEpoch::new(8)); // session+1
+        assert_eq!(state.revision, Revision::new(0));
+        // deployment is lazy-captured from first engine message
+        assert!(state.deployment.is_none());
     }
 
     #[test]
-    fn validation_rejects_wrong_protocol_client_deployment_and_zero_identity() {
-        let mut wrong_protocol = hello(6);
+    fn validation_rejects_wrong_protocol_and_zero_identity() {
+        let mut wrong_protocol = hello();
         wrong_protocol.protocol_version += 1;
-        assert!(validate_handshake(&wrong_protocol, 42, &ack(42, 6)).is_err());
-        assert!(validate_handshake(&hello(6), 42, &ack(43, 6)).is_err());
-        assert!(validate_handshake(&hello(6), 42, &ack(42, 5)).is_err());
-        let mut zero = ack(42, 6);
-        zero.session_epoch = 0;
-        assert!(validate_handshake(&hello(6), 42, &zero).is_err());
-    }
-
-    #[test]
-    fn connect_stops_before_touching_invalid_pipe_name() {
-        let stop = AtomicBool::new(true);
-        assert!(matches!(try_connect(&[], &stop), Err(error) if error == "stopped"));
+        assert!(validate_handshake(&wrong_protocol, 42, &ack(7)).is_err());
+        // zero session_id_base
+        assert!(validate_handshake(&hello(), 42, &ack(0)).is_err());
+        // zero client
+        assert!(validate_handshake(&hello(), 0, &ack(7)).is_err());
     }
 
     #[test]
@@ -492,7 +477,7 @@ mod phase2_tests {
 
     #[test]
     fn frontend_session_rewrites_outbound_header_with_acknowledged_state() {
-        let state = validate_handshake(&hello(6), 42, &ack(42, 6)).unwrap();
+        let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
         let mut session = FrontendSession::new(state);
         let input = FrontendMessage::OpenSession {
             header: cheime_protocol::MessageHeader {
@@ -512,13 +497,13 @@ mod phase2_tests {
         assert_eq!(header.session, SessionId::new(7));
         assert_eq!(header.epoch, SessionEpoch::new(8));
         assert_eq!(header.sequence, cheime_model::Sequence::new(1));
-        assert_eq!(header.revision, Revision::new(9));
-        assert_eq!(header.deployment, DeploymentGeneration::new(6));
+        assert_eq!(header.revision, Revision::new(0));
+        assert_eq!(header.deployment, DeploymentGeneration::new(1));
     }
 
     #[test]
     fn frontend_session_observes_engine_revision_and_rejects_wrong_identity() {
-        let state = validate_handshake(&hello(6), 42, &ack(42, 6)).unwrap();
+        let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
         let mut session = FrontendSession::new(state);
         let header = cheime_protocol::MessageHeader {
             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,

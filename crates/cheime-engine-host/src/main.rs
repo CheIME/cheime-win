@@ -65,7 +65,8 @@ engine:
   segmentors:
     - type: pinyin_syllable
   translators:
-    - type: table_translator
+    - type: table
+      dictionary: test_dict
   filters:
     - type: uniquifier
 "#.to_string()
@@ -79,7 +80,8 @@ engine:
   segmentors:
     - type: pinyin_syllable
   translators:
-    - type: table_translator
+    - type: table
+      dictionary: test_dict
   filters:
     - type: uniquifier
 "#).unwrap()
@@ -138,7 +140,8 @@ engine:
   segmentors:
     - type: pinyin_syllable
   translators:
-    - type: table_translator
+    - type: table
+      dictionary: test_dict
   filters:
     - type: uniquifier
 "#,

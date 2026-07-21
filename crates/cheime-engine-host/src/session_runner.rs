@@ -74,7 +74,8 @@ engine:
   segmentors:
     - type: pinyin_syllable
   translators:
-    - type: table_translator
+    - type: table
+      dictionary: test_dict
   filters:
     - type: uniquifier
 "#,
@@ -87,12 +88,14 @@ engine:
             DictEntry {
                 text: "你".into(),
                 code: "ni".into(),
-                weight: 100,
+                weight: Some(100),
+                stem: None,
             },
             DictEntry {
                 text: "好".into(),
                 code: "hao".into(),
-                weight: 100,
+                weight: Some(100),
+                stem: None,
             },
         ];
         Arc::new(CompiledIndex::build(entries, DeploymentGeneration::new(1)))
@@ -122,11 +125,13 @@ engine:
         let pipeline = test_pipeline();
         let mut session = Session::new(test_identity(), pipeline);
 
+        let mut header = test_identity();
+        header.sequence = Sequence::new(1);
         let msg = FrontendMessage::KeyCommand {
-            header: test_identity(),
+            header,
             event: KeyEvent {
                 key: Key::Character('n'),
-                state: KeyState::Pressed,
+                state: KeyState::default(),
             },
         };
         let responses = session.handle(msg).unwrap();
