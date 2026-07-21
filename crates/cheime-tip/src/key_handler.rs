@@ -118,7 +118,14 @@ fn chinese_mode_keys(
         }
 
         // Digits 0-9 and numpad digits: candidate selection — NOT sent to engine
-        0x30..=0x39 | 0x60..=0x69 => KeyAdmission::PassThrough,
+        // The TIP layer intercepts these in key_down to commit the numbered candidate.
+        0x30..=0x39 | 0x60..=0x69 => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // + and -: page up/down
         0xBB | 0x6B => KeyAdmission::Handled, // =/+

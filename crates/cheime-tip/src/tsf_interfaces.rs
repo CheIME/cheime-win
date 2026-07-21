@@ -5,28 +5,31 @@
 //! One allocation owns every interface header. No TSF activation, edit-session,
 //! pipe, or UI behavior is performed here.
 
-use crate::candidate_window::CandidateWindow;
+use crate::candidate_window::{CandidateWindow, WindowContext};
+use crate::edit_session::request_edit_session;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
 use crate::key_handler::{InputMode, KeyAdmission, check_key};
 use crate::runtime::{
     ActivationResources, ApartmentState, FocusResources, rollback_before_drop, run_before_drop,
 };
-use cheime_model::{Key, KeyEvent, KeyState};
+use cheime_model::{Key, KeyEvent, KeyState, PlatformAction, PlatformActionKind};
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::TipChannel;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
+use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::TextServices::{
-    ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext, ITfDisplayAttributeProvider,
-    ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Vtbl,
-    ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor, ITfTextInputProcessor_Vtbl,
-    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl, ITfThreadMgr, ITfThreadMgrEventSink,
-    ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
+    ITfComposition, ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext,
+    ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink,
+    ITfKeyEventSink_Vtbl, ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor,
+    ITfTextInputProcessor_Vtbl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl,
+    ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
 };
 use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -102,7 +105,7 @@ pub struct ComTip {
     io_thread: RefCell<Option<IoThread>>,
     candidate_window: RefCell<Option<CandidateWindow>>,
     mode: Cell<InputMode>,
-    has_composition: Cell<bool>,
+    pub has_composition: Cell<bool>,
 }
 
 impl ComTip {
@@ -513,7 +516,8 @@ unsafe extern "system" fn activate_ex(
     // Build WindowContext with thread_mgr (cloned above before it moved),
     // client_id, and channel sender.
     let channel_sender = channel.clone_sender();
-    let window_ctx = CandidateWindow::new_context(manager_for_window, client_id, channel_sender);
+    let window_ctx =
+        CandidateWindow::new_context(manager_for_window, client_id, channel_sender, owner);
 
     let cw = match CandidateWindow::create(window_ctx) {
         Ok(cw) => cw,
@@ -624,6 +628,69 @@ unsafe extern "system" fn key_down(
 
     match admission {
         KeyAdmission::Handled => {
+            // --- Digit key handling: commit candidate directly in TIP layer ---
+            let is_digit = (0x30..=0x39).contains(&key_code) || (0x60..=0x69).contains(&key_code);
+            if is_digit && unsafe { (*owner).has_composition.get() } {
+                // Read snapshot, find candidate at index N, and commit via edit session.
+                let digit_idx = if key_code >= 0x60 {
+                    key_code - 0x60
+                } else {
+                    key_code - 0x30
+                };
+                let ctx_ref: *const WindowContext = {
+                    let cw = unsafe { (*owner).candidate_window.try_borrow() };
+                    match cw.as_ref() {
+                        Ok(cw) => {
+                            if let Some(cw) = cw.as_ref() {
+                                cw.ctx_ptr
+                            } else {
+                                std::ptr::null()
+                            }
+                        }
+                        _ => std::ptr::null(),
+                    }
+                };
+                if !ctx_ref.is_null() {
+                    let ctx = unsafe { &*ctx_ref };
+                    let action = if let Ok(st) = ctx.snapshot.lock() {
+                        st.as_ref().and_then(|(snap, _)| {
+                            snap.candidates
+                                .get(digit_idx as usize)
+                                .map(|cand| PlatformAction {
+                                    id: cheime_model::ActionId::new(0),
+                                    epoch: snap.epoch,
+                                    revision: snap.revision,
+                                    kind: PlatformActionKind::Commit {
+                                        text: cand.text.clone(),
+                                    },
+                                })
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(action) = action {
+                        tsf_log(&format!(
+                            "[CheIME] Digit{} commit: {:?}",
+                            digit_idx + 1,
+                            action.kind
+                        ));
+                        if let Ok(doc) = ctx.thread_mgr.GetFocus() {
+                            if let Ok(context) = doc.GetTop() {
+                                request_edit_session(
+                                    ctx.client_id,
+                                    &context,
+                                    action,
+                                    &ctx.channel as *const SyncSender<FrontendMessage>,
+                                    &ctx.composition as *const Mutex<Option<ITfComposition>>,
+                                );
+                            }
+                        }
+                        unsafe { *eaten = BOOL(1) };
+                        return S_OK;
+                    }
+                }
+            }
+
             if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
                 if let Some(ref channel) = *channel {
                     let key = vk_to_key(key_code);
@@ -636,14 +703,6 @@ unsafe extern "system" fn key_down(
                         "[CheIME] OnKeyDown vk={key_code:#04x} key={key:?} mode={:?}",
                         unsafe { (*owner).mode.get() }
                     ));
-                    // Track composition state so backspace can differentiate.
-                    if key_code == 0x08 {
-                        // Backspace: assume engine will clear composition
-                        // (state will be updated by snapshot feedback).
-                    } else {
-                        // Letter or other key: mark that we have composition.
-                        unsafe { (*owner).has_composition.set(true) };
-                    }
                     let _ = channel.try_send(FrontendMessage::KeyCommand {
                         header: cheime_protocol::MessageHeader {
                             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
@@ -818,6 +877,12 @@ unsafe extern "system" fn uninit_document(this: *mut c_void, document: *mut c_vo
     match old {
         Some(Some(old)) => {
             drop(old);
+            // Hide candidate window when document is uninitialized
+            if let Ok(cw) = (*owner).candidate_window.try_borrow() {
+                if let Some(ref cw) = *cw {
+                    cw.hide();
+                }
+            }
             S_OK
         }
         Some(None) => E_UNEXPECTED,

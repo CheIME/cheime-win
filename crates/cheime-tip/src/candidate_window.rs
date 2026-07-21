@@ -5,10 +5,10 @@
 
 use crate::edit_session::request_edit_session;
 use crate::io_thread::{WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
-use crate::tsf_interfaces::tsf_log;
-use cheime_model::{CandidateSnapshot, PlatformAction};
+use crate::tsf_interfaces::{ComTip, tsf_log};
+use cheime_model::{CandidateSnapshot, PlatformAction, PlatformActionKind};
 use cheime_protocol::FrontendMessage;
-use cheime_tip_core::layout::{ROW_PADDING_X, ROW_PADDING_Y, layout_snapshot};
+use cheime_tip_core::layout::{ROW_PADDING_X, ROW_PADDING_Y, hit_test_candidate, layout_snapshot};
 use std::sync::Mutex;
 use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -32,27 +32,28 @@ const FONT_HEIGHT: i32 = 18;
 const CHAR_WIDTH: i32 = 10;
 const LINE_HEIGHT: i32 = 22;
 
-type SnapshotBox = Mutex<Option<(CandidateSnapshot, Vec<RowRender>)>>;
+pub type SnapshotBox = Mutex<Option<(CandidateSnapshot, Vec<RowRender>)>>;
 
-struct RowRender {
-    text: Vec<u16>,
-    y: i32,
-    highlighted: bool,
+pub struct RowRender {
+    pub text: Vec<u16>,
+    pub y: i32,
+    pub highlighted: bool,
 }
 
 /// Context stored as GWLP_USERDATA on the candidate window.
 /// Accessible from the window proc for both snapshot rendering and edit sessions.
 pub struct WindowContext {
-    snapshot: SnapshotBox,
+    pub snapshot: SnapshotBox,
     pub thread_mgr: ITfThreadMgr,
     pub client_id: u32,
     pub channel: SyncSender<FrontendMessage>,
     pub composition: Mutex<Option<ITfComposition>>,
+    pub tip: *mut ComTip,
 }
 
 pub struct CandidateWindow {
     hwnd: HWND,
-    ctx_ptr: *const WindowContext,
+    pub ctx_ptr: *const WindowContext,
 }
 
 impl CandidateWindow {
@@ -116,6 +117,7 @@ impl CandidateWindow {
         thread_mgr: ITfThreadMgr,
         client_id: u32,
         channel: SyncSender<FrontendMessage>,
+        tip: *mut ComTip,
     ) -> Box<WindowContext> {
         Box::new(WindowContext {
             snapshot: Mutex::new(None),
@@ -123,6 +125,7 @@ impl CandidateWindow {
             client_id,
             channel,
             composition: Mutex::new(None),
+            tip,
         })
     }
 
@@ -225,7 +228,13 @@ unsafe extern "system" fn candidate_window_proc(
                     let ctx_ptr = GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0))
                         as *const WindowContext;
                     if !ctx_ptr.is_null() {
-                        if let Ok(mut st) = (&*ctx_ptr).snapshot.lock() {
+                        let ctx = &*ctx_ptr;
+                        // Sync has_composition state on the ComTip from the engine's
+                        // actual preedit text, so backspace/pass-through rules are correct.
+                        if !ctx.tip.is_null() {
+                            (*ctx.tip).has_composition.set(!boxed.preedit.is_empty());
+                        }
+                        if let Ok(mut st) = ctx.snapshot.lock() {
                             *st = Some((*boxed, rows));
                         }
                     }
@@ -298,7 +307,62 @@ unsafe extern "system" fn candidate_window_proc(
                 }
                 LRESULT(0)
             }
-            WM_LBUTTONDOWN => LRESULT(0),
+            WM_LBUTTONDOWN => {
+                // Extract cursor position and determine which candidate row was clicked.
+                let x = (lparam.0 as u16) as i32;
+                let y = ((lparam.0 >> 16) as u16) as i32;
+                let ctx_ptr = GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0))
+                    as *const WindowContext;
+                if !ctx_ptr.is_null() {
+                    let ctx = &*ctx_ptr;
+                    let hit_index = if let Ok(st) = ctx.snapshot.lock() {
+                        if let Some((snap, _)) = st.as_ref() {
+                            hit_test_candidate(
+                                &layout_snapshot(snap, LINE_HEIGHT, CHAR_WIDTH),
+                                x,
+                                y,
+                                LINE_HEIGHT,
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(idx) = hit_index {
+                        // Find the candidate by display index
+                        if let Ok(st) = ctx.snapshot.lock() {
+                            if let Some((snap, _)) = st.as_ref() {
+                                let candidate = snap.candidates.get(idx.saturating_sub(1));
+                                if let Some(cand) = candidate {
+                                    let action = PlatformAction {
+                                        id: cheime_model::ActionId::new(0),
+                                        epoch: snap.epoch,
+                                        revision: snap.revision,
+                                        kind: PlatformActionKind::Commit {
+                                            text: cand.text.clone(),
+                                        },
+                                    };
+                                    tsf_log(&format!("[CheIME] Click commit: {}", cand.text));
+                                    if let Ok(doc) = ctx.thread_mgr.GetFocus() {
+                                        if let Ok(context) = doc.GetTop() {
+                                            request_edit_session(
+                                                ctx.client_id,
+                                                &context,
+                                                action,
+                                                &ctx.channel as *const SyncSender<FrontendMessage>,
+                                                &ctx.composition
+                                                    as *const Mutex<Option<ITfComposition>>,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
             WM_DESTROY => {
                 // Free the stored WindowContext. Called synchronously from
                 // DestroyWindow in CandidateWindow::Drop.
