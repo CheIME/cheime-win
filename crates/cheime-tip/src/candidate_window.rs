@@ -229,11 +229,11 @@ unsafe extern "system" fn candidate_window_proc(
                             *st = Some((*boxed, rows));
                         }
                     }
-                    // Size and position window based on content
+                    // Show the candidate window
                     let _ = SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
-                        100, // x — TODO: get from caret via ITfContext::GetSelection
+                        100, // x — TODO: get from caret
                         200, // y — TODO: get from caret
                         max_width.max(200),
                         total_height.max(LINE_HEIGHT * 2),
@@ -241,8 +241,8 @@ unsafe extern "system" fn candidate_window_proc(
                     );
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     let _ = InvalidateRect(hwnd, None, true);
-                } else {
-                    // When preedit is empty and no candidates, hide window
+                } else if lparam.0 == 0 {
+                    // Empty snapshot: hide window
                     let _ = ShowWindow(hwnd, SW_HIDE);
                 }
                 LRESULT(0)

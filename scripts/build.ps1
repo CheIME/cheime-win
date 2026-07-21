@@ -7,7 +7,7 @@
 # Run from any directory — resolves the repo root via $PSScriptRoot.
 
 param(
-    [string]$StagingRoot = $(if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v3" } else { Join-Path $env:TEMP "cheime-stage" }),
+    [string]$StagingRoot = $(if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v4" } else { Join-Path $env:TEMP "cheime-stage" }),
     [switch]$SkipGates
 )
 
