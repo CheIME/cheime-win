@@ -120,6 +120,14 @@ try {
     # ── Phase 1: Copy bundle ──────────────────────────────────────────────
     Write-Phase -Title $phases[0] -Num 1
 
+    # Kill stale engine processes from previous runs
+    $stale = Get-Process -Name "cheime-engine" -ErrorAction SilentlyContinue
+    if ($stale) {
+        Write-Host "  [INFO] Killing stale engine processes..."
+        $stale | ForEach-Object { try { $_.Kill(); Write-Host "    Killed PID $($_.Id)" } catch {} }
+        Start-Sleep -Milliseconds 500
+    }
+
     if (-not (Test-Path (Join-Path $scriptDir "bin\cheime-tip.dll"))) {
         throw "Bundle not found at $scriptDir. The mapped folder should contain bin/, data/, etc."
     }
@@ -138,6 +146,8 @@ try {
         if (-not (Test-Path $src -PathType Leaf)) {
             throw "Bundle missing: $src"
         }
+        # Remove destination if it exists (locked file blocks overwrite)
+        if (Test-Path $dst) { Remove-Item -Force $dst -ErrorAction SilentlyContinue }
         Copy-Item -Force $src $dst
         Write-Host "  [OK] Copied $rel"
     }
