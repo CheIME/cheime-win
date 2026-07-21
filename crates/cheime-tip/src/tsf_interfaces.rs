@@ -579,6 +579,7 @@ unsafe extern "system" fn test_key(
     let is_shift = unsafe { GetKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetKeyState(0x11) } < 0;
     let is_alt = unsafe { GetKeyState(0x12) } < 0;
+    let ctrl_space = key_code == 0x20 && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
@@ -586,7 +587,13 @@ unsafe extern "system" fn test_key(
         }))
     }) {
         Some(Some((activated, (mode, has_comp)))) => check_key(
-            mode, activated, key_code, is_shift, is_ctrl, is_alt, has_comp,
+            mode,
+            activated,
+            key_code,
+            is_shift,
+            is_ctrl || ctrl_space,
+            is_alt,
+            has_comp,
         ),
         _ => KeyAdmission::PassThrough,
     };
@@ -614,6 +621,7 @@ unsafe extern "system" fn key_down(
     let is_shift = unsafe { GetKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetKeyState(0x11) } < 0;
     let is_alt = unsafe { GetKeyState(0x12) } < 0;
+    let ctrl_space = key_code == 0x20 && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
@@ -621,7 +629,13 @@ unsafe extern "system" fn key_down(
         }))
     }) {
         Some(Some((activated, (mode, has_comp)))) => check_key(
-            mode, activated, key_code, is_shift, is_ctrl, is_alt, has_comp,
+            mode,
+            activated,
+            key_code,
+            is_shift,
+            is_ctrl || ctrl_space,
+            is_alt,
+            has_comp,
         ),
         _ => KeyAdmission::PassThrough,
     };

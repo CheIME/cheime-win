@@ -74,8 +74,15 @@ fn chinese_mode_keys(
     has_composition: bool,
 ) -> KeyAdmission {
     // Ctrl+Space / Shift+Space: toggle mode
-    if (is_ctrl || is_shift) && !is_alt && key_code == 0x20 {
-        return KeyAdmission::ToggleMode;
+    // Must check Shift+Space first (Ctrl key may also be reported as pressed
+    // by the keyboard hardware or GetKeyState in TSF callbacks).
+    if key_code == 0x20 && !is_alt {
+        if is_ctrl && !is_shift {
+            return KeyAdmission::ToggleMode;
+        }
+        if is_shift && !is_ctrl {
+            return KeyAdmission::ToggleMode;
+        }
     }
 
     // Ctrl/Alt modifiers → pass through (application shortcuts)
