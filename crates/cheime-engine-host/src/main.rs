@@ -9,7 +9,7 @@ mod server;
 mod session_runner;
 
 use cheime_config::schema::SchemaConfig;
-use cheime_dictionary::{CompiledIndex, DictCache};
+use cheime_dictionary::{CompiledIndex, DictCache, DictColumn};
 use cheime_user_data::UserStore;
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -25,18 +25,9 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--pipe" => {
-                i += 1;
-                if i < args.len() { pipe_name = args[i].clone(); }
-            }
-            "--dict-dir" => {
-                i += 1;
-                if i < args.len() { dict_dir = Some(PathBuf::from(&args[i])); }
-            }
-            "--config" => {
-                i += 1;
-                if i < args.len() { config_path = Some(PathBuf::from(&args[i])); }
-            }
+            "--pipe" => { i += 1; if i < args.len() { pipe_name = args[i].clone(); } }
+            "--dict-dir" => { i += 1; if i < args.len() { dict_dir = Some(PathBuf::from(&args[i])); } }
+            "--config" => { i += 1; if i < args.len() { config_path = Some(PathBuf::from(&args[i])); } }
             "--stdin" => stdin_mode = true,
             "--help" => { print_usage(); return; }
             _ => {}
@@ -47,95 +38,57 @@ fn main() {
     eprintln!("CheIME Engine Host v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("Protocol version: {}", cheime_model::CORE_PROTOCOL_VERSION);
 
+    // ── Load dict (shared between pipe server and stdin mode) ─────────
+    let dict_dir = dict_dir.unwrap_or_else(|| data_dir().join("data").join("dicts"));
+    eprintln!("Loading dictionaries from: {}", dict_dir.display());
+    let index = load_index(&dict_dir);
+
     if stdin_mode {
-        run_stdin_mode();
+        run_stdin_mode(index);
         return;
     }
 
-    // Load config
+    // ── Pipe server mode ──────────────────────────────────────────────
     let config_path = config_path.unwrap_or_else(|| {
         data_dir().join("config").join("schemas").join("quanpin.yaml")
     });
-    let config: SchemaConfig = {
-        let yaml = std::fs::read_to_string(&config_path)
-            .unwrap_or_else(|_| {
-                // Fallback: minimal inline config
-                r#"schema_version: 1
-engine:
-  segmentors:
-    - type: pinyin_syllable
-  translators:
-    - type: table
-      dictionary: test_dict
-  filters:
-    - type: uniquifier
-"#.to_string()
-            });
-        let loader = cheime_config::ConfigLoader::new()
-            .with_base_dir(config_path.parent().unwrap().to_string_lossy().to_string());
-        loader.load(&yaml).unwrap_or_else(|e| {
-            eprintln!("warning: config load failed ({e}), using minimal config");
-            serde_yaml::from_str(r#"schema_version: 1
-engine:
-  segmentors:
-    - type: pinyin_syllable
-  translators:
-    - type: table
-      dictionary: test_dict
-  filters:
-    - type: uniquifier
-"#).unwrap()
-        })
-    };
+    let config = load_config(&config_path);
 
-    // Load dictionaries
-    let dict_dir = dict_dir.unwrap_or_else(|| data_dir().join("data").join("dicts"));
-    eprintln!("Loading dictionaries from: {}", dict_dir.display());
-
-    let index = if dict_dir.exists() {
-        let files: Vec<PathBuf> = std::fs::read_dir(&dict_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
-            .unwrap_or_default();
-        let cache = DictCache::new(data_dir().join("cache"));
-        match cache.load_or_build(&files, "dictionaries", &[], cheime_model::DeploymentGeneration::new(1)) {
-            Ok(idx) => Arc::new(idx),
-            Err(e) => {
-                eprintln!("warning: dict cache error: {e}, using empty index");
-                Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)))
-            }
-        }
-    } else {
-        eprintln!("Dictionary directory not found, using empty index");
-        Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)))
-    };
-
-    // User store
     let db_path = data_dir().join("user_data.db");
     let user_store = UserStore::open("engine-host", &db_path)
         .unwrap_or_else(|_| UserStore::new("engine-host"));
     let store = Arc::new(Mutex::new(user_store));
 
     eprintln!("Starting named pipe server...");
-
-    // Run server with shared data (pipeline built per connection)
     if let Err(e) = server::run_server(&config, index, store, &pipe_name) {
         eprintln!("Server error: {e}");
     }
 }
+// ── Loaders ─────────────────────────────────────────────────────────
 
-/// Run in stdin/stdout mode for testing without named pipes.
-fn run_stdin_mode() {
-    use cheime_model::{
-        CORE_PROTOCOL_VERSION, ClientInstanceId, DeploymentGeneration, Key, KeyEvent, KeyState,
-        Revision, Sequence, SessionEpoch, SessionId,
-    };
-    use cheime_pipeline::factory::PipelineFactory;
-    use cheime_protocol::{EngineMessage, FrontendMessage, MessageHeader};
-    use cheime_session::Session;
-    use std::io::{self, BufRead, Write};
+fn load_index(dict_dir: &PathBuf) -> Arc<CompiledIndex> {
+    if !dict_dir.exists() {
+        eprintln!("Dictionary directory not found, using empty index");
+        return Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)));
+    }
+    let files: Vec<PathBuf> = std::fs::read_dir(dict_dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    let cache = DictCache::new(data_dir().join("cache"));
+    match cache.load_or_build(&files, "dictionaries", &[DictColumn::Text, DictColumn::Code, DictColumn::Weight], cheime_model::DeploymentGeneration::new(1)) {
+        Ok(idx) => {
+            eprintln!("Loaded {} entries", idx.total_entries);
+            Arc::new(idx)
+        }
+        Err(e) => {
+            eprintln!("warning: dict cache error: {e}, using empty index");
+            Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)))
+        }
+    }
+}
 
-    let config: SchemaConfig = serde_yaml::from_str(
-        r#"schema_version: 1
+fn load_config(config_path: &PathBuf) -> SchemaConfig {
+    let fallback = r#"schema_version: 1
 engine:
   segmentors:
     - type: pinyin_syllable
@@ -144,11 +97,39 @@ engine:
       dictionary: test_dict
   filters:
     - type: uniquifier
-"#,
-    )
-    .unwrap();
+"#;
+    let yaml = std::fs::read_to_string(config_path).unwrap_or_else(|_| fallback.to_string());
+    let parent_dir = config_path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let loader = cheime_config::ConfigLoader::new().with_base_dir(parent_dir);
+    loader.load(&yaml).unwrap_or_else(|e| {
+        eprintln!("warning: config load failed ({e}), using minimal config");
+        serde_yaml::from_str(fallback).unwrap()
+    })
+}
 
-    let index = Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)));
+// ── stdin mode ─────────────────────────────────────────────────────
+
+fn run_stdin_mode(index: Arc<CompiledIndex>) {
+    use cheime_model::{
+        CORE_PROTOCOL_VERSION, ClientInstanceId, DeploymentGeneration, Key, KeyEvent, KeyState,
+        Revision, Sequence, SessionEpoch, SessionId,
+    };
+    use cheime_pipeline::factory::PipelineFactory;
+    use cheime_protocol::{FrontendMessage, MessageHeader};
+    use cheime_session::Session;
+    use std::io::{self, BufRead, Write};
+
+    let config: SchemaConfig = serde_yaml::from_str(r#"schema_version: 1
+engine:
+  segmentors:
+    - type: pinyin_syllable
+  translators:
+    - type: table
+      dictionary: test_dict
+  filters:
+    - type: uniquifier
+"#).unwrap();
+
     let store = Arc::new(Mutex::new(UserStore::new("stdin")));
     let pipeline = PipelineFactory::build(&config, Some(store), Some(index), None).unwrap();
 
@@ -164,7 +145,7 @@ engine:
     let mut session = Session::new(init_header, pipeline);
     let mut next_seq: u64 = 1;
 
-    eprintln!("stdin mode ready. Type pinyin and press Enter.");
+    eprintln!("stdin mode ready. Type pinyin (one letter per line) and press Enter.");
     let stdin = io::stdin();
     for line in stdin.lock().lines().flatten() {
         let line = line.trim().to_string();
@@ -174,7 +155,10 @@ engine:
         let msg: FrontendMessage = match serde_json::from_str(&line) {
             Ok(msg) => msg,
             Err(_) => {
-                let event = KeyEvent { key: Key::Character(line.chars().next().unwrap_or('a')), state: KeyState::default() };
+                let event = KeyEvent {
+                    key: Key::Character(line.chars().next().unwrap_or('a')),
+                    state: KeyState::default(),
+                };
                 FrontendMessage::KeyCommand {
                     header: MessageHeader {
                         protocol_version: CORE_PROTOCOL_VERSION,
@@ -205,18 +189,10 @@ engine:
 }
 
 fn data_dir() -> PathBuf {
-    std::env::var("CHEIME_DATA_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let mut p = dirs_next().unwrap_or_else(PathBuf::new);
-            p.push("cheime");
-            p
-        })
-}
-
-fn dirs_next() -> Option<PathBuf> {
-    std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
+    std::env::var("CHEIME_DATA_DIR").ok().map(PathBuf::from).unwrap_or_else(|| {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        PathBuf::from(local).join("cheime")
+    })
 }
 
 fn print_usage() {
