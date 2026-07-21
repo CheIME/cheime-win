@@ -152,7 +152,7 @@ engine:
     let store = Arc::new(Mutex::new(UserStore::new("stdin")));
     let pipeline = PipelineFactory::build(&config, Some(store), Some(index), None).unwrap();
 
-    let header = MessageHeader {
+    let init_header = MessageHeader {
         protocol_version: CORE_PROTOCOL_VERSION,
         client: ClientInstanceId::new(1),
         session: SessionId::new(1),
@@ -161,7 +161,8 @@ engine:
         revision: Revision::new(0),
         deployment: DeploymentGeneration::new(1),
     };
-    let mut session = Session::new(header, pipeline);
+    let mut session = Session::new(init_header, pipeline);
+    let mut next_seq: u64 = 1;
 
     eprintln!("stdin mode ready. Type pinyin and press Enter.");
     let stdin = io::stdin();
@@ -173,7 +174,6 @@ engine:
         let msg: FrontendMessage = match serde_json::from_str(&line) {
             Ok(msg) => msg,
             Err(_) => {
-                // Treat as raw pinyin input
                 let event = KeyEvent { key: Key::Character(line.chars().next().unwrap_or('a')), state: KeyState::default() };
                 FrontendMessage::KeyCommand {
                     header: MessageHeader {
@@ -181,7 +181,7 @@ engine:
                         client: ClientInstanceId::new(1),
                         session: SessionId::new(1),
                         epoch: SessionEpoch::new(1),
-                        sequence: Sequence::new(0),
+                        sequence: Sequence::new(next_seq),
                         revision: Revision::new(0),
                         deployment: DeploymentGeneration::new(1),
                     },
@@ -189,6 +189,7 @@ engine:
                 }
             }
         };
+        next_seq = next_seq.saturating_add(1);
 
         match session.handle(msg) {
             Ok(responses) => {
