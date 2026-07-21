@@ -11,5 +11,5 @@ cheime-model.workspace = true
 cheime-protocol.workspace = true
 cheime-wire.workspace = true
 serde.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
-windows.workspace = true

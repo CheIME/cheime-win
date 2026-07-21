@@ -10,6 +10,7 @@ pub mod channel;
 pub mod error;
 pub mod layout;
 pub mod pipe;
+pub mod ui_config;
 
 pub use channel::{DispatchMessage, TipChannel};
 pub use error::PipeError;

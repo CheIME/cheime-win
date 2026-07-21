@@ -221,8 +221,8 @@ dependencies = [
  "cheime-protocol",
  "cheime-wire",
  "serde",
+ "serde_yaml",
  "thiserror",
- "windows",
 ]
 
 [[package]]

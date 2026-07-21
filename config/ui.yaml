@@ -1,0 +1,37 @@
+# CheIME UI Configuration
+# Completely decoupled from engine schema/profiles.
+# Style: Rime extends chain, deep merge, deny_unknown_fields.
+
+extends: []
+
+# ── Window appearance ─────────────────────────────────────────────────
+window:
+  # Windows 10+: opaque always works; acrylic=Win10, mica=Win11 only
+  material: opaque
+  opacity: 1.0
+  padding: [8, 4]
+  caret_offset_x: 0
+  caret_offset_y: 0
+  min_width: 200
+
+# ── Candidate list ────────────────────────────────────────────────────
+candidate:
+  font_size: 18
+  # char_width: 12  # unset = auto from font_size
+  line_height: 22
+  row_padding_x: 10
+  row_padding_y: 2
+  page_size: 10
+  label_size: 14
+
+# ── Theme colors ──────────────────────────────────────────────────────
+theme:
+  use_system_accent: true
+  colors:
+    background: "#ffffff"
+    foreground: "#000000"
+    candidate_text: "#333333"
+    selected_text: "#ffffff"
+    selected_background: "#0078d4"
+    label_color: "#333333"
+    comment_color: "#888888"
