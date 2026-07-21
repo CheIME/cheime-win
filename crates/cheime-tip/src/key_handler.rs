@@ -107,8 +107,15 @@ fn chinese_mode_keys(
         // Escape: handled
         0x1B => KeyAdmission::Handled,
 
-        // Space: handled (select candidate or commit)
-        0x20 => KeyAdmission::Handled,
+        // Space: handle commit/select.  When no composition, pass-through
+        // so the application receives a real space character.
+        0x20 => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // Digits 0-9 and numpad digits: candidate selection — NOT sent to engine
         0x30..=0x39 | 0x60..=0x69 => KeyAdmission::PassThrough,
@@ -295,7 +302,7 @@ mod tests {
                 false,
                 false,
                 false,
-                false
+                true
             ),
             KeyAdmission::Handled
         );

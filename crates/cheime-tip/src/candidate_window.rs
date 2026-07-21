@@ -218,6 +218,10 @@ unsafe extern "system" fn candidate_window_proc(
                         boxed.candidates.len()
                     ));
                     let rows = build_rows(&boxed, LINE_HEIGHT);
+                    let total_height = rows.len() as i32 * LINE_HEIGHT + ROW_PADDING_Y * 2;
+                    let max_width = rows.iter().map(|r| r.text.len()).max().unwrap_or(0) as i32
+                        * CHAR_WIDTH
+                        + ROW_PADDING_X * 2;
                     let ctx_ptr = GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0))
                         as *const WindowContext;
                     if !ctx_ptr.is_null() {
@@ -225,18 +229,21 @@ unsafe extern "system" fn candidate_window_proc(
                             *st = Some((*boxed, rows));
                         }
                     }
-                    // Auto-position and show the window near the caret
+                    // Size and position window based on content
                     let _ = SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
-                        100, // x — TODO: get actual caret position
-                        200, // y — TODO: get actual caret position
-                        0,
-                        0,
-                        SWP_NOACTIVATE | SWP_NOSIZE,
+                        100, // x — TODO: get from caret via ITfContext::GetSelection
+                        200, // y — TODO: get from caret
+                        max_width.max(200),
+                        total_height.max(LINE_HEIGHT * 2),
+                        SWP_NOACTIVATE,
                     );
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     let _ = InvalidateRect(hwnd, None, true);
+                } else {
+                    // When preedit is empty and no candidates, hide window
+                    let _ = ShowWindow(hwnd, SW_HIDE);
                 }
                 LRESULT(0)
             }

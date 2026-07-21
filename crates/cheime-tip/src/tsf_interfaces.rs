@@ -636,6 +636,14 @@ unsafe extern "system" fn key_down(
                         "[CheIME] OnKeyDown vk={key_code:#04x} key={key:?} mode={:?}",
                         unsafe { (*owner).mode.get() }
                     ));
+                    // Track composition state so backspace can differentiate.
+                    if key_code == 0x08 {
+                        // Backspace: assume engine will clear composition
+                        // (state will be updated by snapshot feedback).
+                    } else {
+                        // Letter or other key: mark that we have composition.
+                        unsafe { (*owner).has_composition.set(true) };
+                    }
                     let _ = channel.try_send(FrontendMessage::KeyCommand {
                         header: cheime_protocol::MessageHeader {
                             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
@@ -655,14 +663,19 @@ unsafe extern "system" fn key_down(
         }
         KeyAdmission::ToggleMode => {
             unsafe {
-                (*owner).mode.set(match (*owner).mode.get() {
+                let prev = (*owner).mode.get();
+                (*owner).mode.set(match prev {
                     InputMode::Chinese => InputMode::Direct,
                     InputMode::Direct => InputMode::Chinese,
-                })
+                });
+                // Reset composition tracking on toggle so empty backspace passes through
+                (*owner).has_composition.set(false);
+                tsf_log(&format!(
+                    "[CheIME] ToggleMode {:?} → {:?}",
+                    prev,
+                    (*owner).mode.get()
+                ));
             };
-            tsf_log(&format!("[CheIME] ToggleMode → {:?}", unsafe {
-                (*owner).mode.get()
-            }));
             unsafe { *eaten = BOOL(1) };
             S_OK
         }

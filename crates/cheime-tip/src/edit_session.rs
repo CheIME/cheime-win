@@ -211,7 +211,10 @@ fn handle_commit(
         };
         let comp = match guard.as_ref() {
             Some(c) => c,
-            None => break 'work Err("no active composition".into()),
+            None => {
+                tsf_log("[CheIME] commit: no active composition — trying commit-at-selection");
+                break 'work commit_at_selection(ec, context, text);
+            }
         };
         let range = match unsafe { comp.GetRange() } {
             Ok(r) => r,
@@ -373,6 +376,29 @@ fn handle_cancel_composition(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Commit text at the current selection point without an active composition.
+fn commit_at_selection(ec: u32, context: &ITfContext, text: &str) -> Result<(), String> {
+    let mut selection = [zeroed_selection()];
+    let mut fetched = 0u32;
+    if unsafe { context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched) }
+        .is_err()
+    {
+        return Err("GetSelection failed".into());
+    }
+    if fetched == 0 {
+        return Err("GetSelection fetched 0".into());
+    }
+    let sel_range = match selection[0].range.as_ref() {
+        Some(r) => r,
+        None => return Err("GetSelection returned None range".into()),
+    };
+    let text_wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe { sel_range.SetText(ec, 0, &text_wide) }.map_err(|e| format!("SetText: {e}"))?;
+    unsafe { sel_range.Collapse(ec, TF_ANCHOR_END) }.map_err(|e| format!("Collapse: {e}"))?;
+    release_selection_range(selection);
+    Ok(())
+}
 
 /// End the active composition tracked in the composition mutex.
 fn end_active_composition(

@@ -138,6 +138,7 @@ fn io_thread_main(
             match reader.read_message_until(&codec, deadline) {
                 Ok(Some(msg)) => {
                     if session.observe_engine(&msg).is_err() {
+                        tsf_log("[CheIME] IO: engine identity mismatch, reconnecting");
                         continue 'reconnect;
                     }
                     match msg {
