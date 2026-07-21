@@ -5,7 +5,7 @@
 //! One allocation owns every interface header. No TSF activation, edit-session,
 //! pipe, or UI behavior is performed here.
 
-use crate::candidate_window::{CandidateWindow, WindowContext};
+use crate::candidate_window::{CandidateWindow};
 use crate::edit_session::request_edit_session;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
@@ -640,70 +640,35 @@ unsafe extern "system" fn key_down(
         _ => KeyAdmission::PassThrough,
     };
 
-    match admission {
-        KeyAdmission::Handled => {
-            // --- Digit key handling: commit candidate directly in TIP layer ---
-            let is_digit = (0x30..=0x39).contains(&key_code) || (0x60..=0x69).contains(&key_code);
-            if is_digit && unsafe { (*owner).has_composition.get() } {
-                // Read snapshot, find candidate at index N, and commit via edit session.
-                let digit_idx = if key_code >= 0x60 {
-                    key_code - 0x60
-                } else {
-                    key_code - 0x30
-                };
-                // digit_idx: 0='0', 1='1', ..., 9='9'
-                // 1 → select first candidate (index 0)
-                // 0 → select tenth candidate (index 9)
-                let candidate_offset = if digit_idx == 0 {
-                    9
-                } else {
-                    (digit_idx as usize).saturating_sub(1)
-                };
-                let ctx_ref: *const WindowContext = {
-                    let cw = unsafe { (*owner).candidate_window.try_borrow() };
-                    match cw.as_ref() {
-                        Ok(cw) => {
-                            if let Some(cw) = cw.as_ref() {
-                                cw.ctx_ptr
-                            } else {
-                                std::ptr::null()
-                            }
-                        }
-                        _ => std::ptr::null(),
-                    }
-                };
-                if !ctx_ref.is_null() {
-                    let ctx = unsafe { &*ctx_ref };
-                    let action = if let Ok(st) = ctx.snapshot.lock() {
-                        st.as_ref().and_then(|(snap, _)| {
-                            snap.candidates
-                                .get(candidate_offset)
-                                .map(|cand| PlatformAction {
-                                    id: cheime_model::ActionId::new(0),
-                                    epoch: snap.epoch,
-                                    revision: snap.revision,
-                                    kind: PlatformActionKind::Commit {
-                                        text: cand.text.clone(),
-                                    },
-                                })
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(action) = action {
-                        tsf_log(&format!(
-                            "[CheIME] Digit{} commit (offset={}): {:?}",
-                            digit_idx, candidate_offset, action.kind
-                        ));
-                        if let Ok(doc) = ctx.thread_mgr.GetFocus() {
-                            if let Ok(context) = doc.GetTop() {
-                                request_edit_session(
-                                    ctx.client_id,
-                                    &context,
-                                    action,
+    // --- Digit key: commit candidate directly in TIP layer (before engine) ---
+    let is_digit = (0x30..=0x39).contains(&key_code) || (0x60..=0x69).contains(&key_code);
+    if is_digit && unsafe { (*owner).has_composition.get() } {
+        let digit_idx = if key_code >= 0x60 { key_code - 0x60 } else { key_code - 0x30 };
+        let candidate_offset = if digit_idx == 0 { 9 } else { (digit_idx as usize).saturating_sub(1) };
+        let ctx_ref = {
+            let cw = unsafe { (*owner).candidate_window.try_borrow() };
+            match cw.as_ref().ok().and_then(|cw| cw.as_ref()) {
+                Some(cw) => cw.ctx_ptr,
+                _ => std::ptr::null(),
+            }
+        };
+        if !ctx_ref.is_null() {
+            let ctx = unsafe { &*ctx_ref };
+            if let Ok(st) = ctx.snapshot.lock() {
+                if let Some((snap, _)) = st.as_ref() {
+                    if let Some(cand) = snap.candidates.get(candidate_offset) {
+                        let action = PlatformAction {
+                            id: cheime_model::ActionId::new(0),
+                            epoch: snap.epoch,
+                            revision: snap.revision,
+                            kind: PlatformActionKind::Commit { text: cand.text.clone() },
+                        };
+                        tsf_log(&format!("[CheIME] Digit{} commit (offset={}): {:?}", digit_idx, candidate_offset, action.kind));
+                        if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
+                            if let Ok(context) = unsafe { doc.GetTop() } {
+                                request_edit_session(ctx.client_id, &context, action,
                                     &ctx.channel as *const SyncSender<FrontendMessage>,
-                                    &ctx.composition as *const Mutex<Option<ITfComposition>>,
-                                );
+                                    &ctx.composition as *const Mutex<Option<ITfComposition>>);
                             }
                         }
                         unsafe { *eaten = BOOL(1) };
@@ -711,7 +676,11 @@ unsafe extern "system" fn key_down(
                     }
                 }
             }
+        }
+    }
 
+    match admission {
+        KeyAdmission::Handled => {
             if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
                 if let Some(ref channel) = *channel {
                     let key = vk_to_key(key_code);

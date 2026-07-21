@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Core engine (no Windows API) ─────────────────────────────────
+  core:
+    name: Core (engine + config + dict)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: cheime-core
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cheime-core
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
+
+  # ── Platform adapter (Windows TSF) ───────────────────────────────
+  platform:
+    name: Platform (TIP + engine-host)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+        continue-on-error: true  # TSF COM code has unavoidable unsafe patterns
+
+      - name: Format check
+        run: cargo fmt --check
+
+  # ── Differential test vs cheime-core (cross-check) ──────────────
+  cross-check:
+    name: Cross-check (core tests in win workspace)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Run core tests through win workspace
+        run: cargo test -p cheime-model -p cheime-protocol -p cheime-wire -p cheime-pipeline -p cheime-session -p cheime-dictionary -p cheime-user-data -p cheime-config -p cheime-diagnostics

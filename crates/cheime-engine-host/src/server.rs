@@ -31,7 +31,6 @@ use windows::Win32::System::Pipes::{
 };
 use windows::core::PCWSTR;
 
-use windows::Win32::System::Threading::{CreateThread, THREAD_CREATION_FLAGS};
 /// Default pipe name for the engine.
 pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\cheime-engine";
 
@@ -126,48 +125,17 @@ fn run_server_until(
         let cfg = config.clone();
         let idx = Arc::clone(&index);
         let store = Arc::clone(&user_store);
-
-        unsafe {
-            let _ = CreateThread(
-                None,
-                0,
-                Some(handle_client_thread),
-                Some(Box::into_raw(Box::new(ClientCtx {
-                    handle,
-                    config: cfg,
-                    index: idx,
-                    user_store: store,
-                    deployment,
-                    connection_id: conn_id,
-                })) as *mut std::ffi::c_void),
-                THREAD_CREATION_FLAGS(0),
-                None,
-            );
-        }
+        let raw_handle = handle.0 as usize; // raw handle value; safe across threads
+        std::thread::spawn(move || {
+            let h = HANDLE(raw_handle as *mut std::ffi::c_void);
+            if let Err(e) = handle_client(h, &cfg, idx, store, deployment, conn_id) {
+                eprintln!("[engine] connection {} error: {e}", conn_id);
+            }
+        });
     }
 
     Ok(())
 }
-
-/// Context passed to each client handler thread.
-struct ClientCtx {
-    handle: HANDLE,
-    config: SchemaConfig,
-    index: Arc<CompiledIndex>,
-    user_store: Arc<Mutex<UserStore>>,
-    deployment: DeploymentGeneration,
-    connection_id: u64,
-}
-
-unsafe extern "system" fn handle_client_thread(raw: *mut std::ffi::c_void) -> u32 {
-    let ctx = unsafe { Box::from_raw(raw as *mut ClientCtx) };
-    let result = handle_client(ctx.handle, &ctx.config, ctx.index, ctx.user_store, ctx.deployment, ctx.connection_id);
-    if let Err(e) = result {
-        eprintln!("[engine] connection {} error: {e}", ctx.connection_id);
-    }
-    0
-}
-
 /// Handle one client: handshake → session loop → cleanup.
 fn handle_client(
     pipe_handle: HANDLE,

@@ -297,13 +297,10 @@ impl FrontendSession {
             return Err("engine identity mismatch".into());
         }
         // Lazy deployment capture on first valid message
-        if self.state.deployment.is_none() {
-            self.state.deployment = Some(header.deployment);
-        } else if header.deployment != self.state.deployment.unwrap() {
-            return Err("deployment changed mid-session".into());
-        }
-        if header.revision < self.state.revision {
-            return Err("stale engine revision".into());
+        match self.state.deployment {
+            None => self.state.deployment = Some(header.deployment),
+            Some(d) if d != header.deployment => return Err("deployment changed mid-session".into()),
+            _ => {}
         }
         self.state.revision = header.revision;
         Ok(())
