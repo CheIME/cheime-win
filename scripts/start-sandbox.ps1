@@ -21,7 +21,7 @@ $template = Join-Path $repoRoot "sandbox\CheIME.wsb.template"
 # 1. Build & stage
 if (-not $SkipBuild) {
     Write-Host "=== Running build.ps1 ===" -ForegroundColor Cyan
-    $stagingRoot = if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v2" } else { Join-Path $env:TEMP "cheime-stage" }
+    $stagingRoot = if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v3" } else { Join-Path $env:TEMP "cheime-stage" }
     & $buildScript -StagingRoot $stagingRoot
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Build/stage failed. Fix errors and re-run."
@@ -30,7 +30,7 @@ if (-not $SkipBuild) {
 }
 
 # 2. Determine bundle path
-$stagingRoot = if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v2" } else { Join-Path $env:TEMP "cheime-stage" }
+$stagingRoot = if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v3" } else { Join-Path $env:TEMP "cheime-stage" }
 $bundleDir = Join-Path $stagingRoot "cheime-bundle"
 if (-not (Test-Path $bundleDir)) {
     Write-Error "Bundle not found at $bundleDir. Run build.ps1 first."
