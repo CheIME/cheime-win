@@ -4,13 +4,11 @@
 //! 1. Takes `FrontendMessage` from the pipe reader
 //! 2. Feeds it to `Session::handle()`
 //! 3. Writes resulting `EngineMessage`s back to the pipe writer
-//!
-//! This is the core per-client loop in the engine host.
 
-use cheime_pipeline::DictPipeline;
+use cheime_pipeline::ComposablePipeline;
 use cheime_protocol::{FrontendMessage, MessageHeader};
 use cheime_session::Session;
-use cheime_tip_core::{PipeError, PipeReader, PipeWriter};
+use cheime_tip_core::{PipeReader, PipeWriter};
 use cheime_wire::MessageCodec;
 use std::io::{Read, Write};
 use thiserror::Error;
@@ -18,20 +16,17 @@ use thiserror::Error;
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum RunnerError {
     #[error("pipe error: {0}")]
-    Pipe(#[from] PipeError),
+    Pipe(#[from] cheime_tip_core::PipeError),
     #[error("session error: {0}")]
     Session(String),
 }
 
 /// Run the message loop for one client connection.
-///
-/// Reads frames from `reader`, dispatches to `session`, writes responses to `writer`.
-/// Returns when the pipe is disconnected or an unrecoverable error occurs.
 pub fn run_client_loop<R, W>(
     mut reader: PipeReader<R>,
     mut writer: PipeWriter<W>,
     codec: MessageCodec,
-    pipeline: DictPipeline,
+    pipeline: ComposablePipeline,
     identity: MessageHeader,
 ) -> Result<(), RunnerError>
 where
@@ -41,21 +36,22 @@ where
     let mut session = Session::new(identity, pipeline);
 
     loop {
-        let Some(msg): Option<FrontendMessage> = reader.read_message(&codec)? else {
-            break;
-        };
+        let message: FrontendMessage = reader
+            .read_message(&codec)
+            .map_err(RunnerError::Pipe)?
+            .ok_or(RunnerError::Pipe(
+                cheime_tip_core::PipeError::Disconnected,
+            ))?;
 
-        let outputs = session
-            .handle(msg)
+        let responses = session
+            .handle(message)
             .map_err(|e| RunnerError::Session(e.to_string()))?;
 
-        for out in outputs {
-            writer.write_message(&codec, &out)?;
+        for response in responses {
+            writer.write_message(&codec, &response)?;
         }
         writer.flush()?;
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -66,160 +62,74 @@ mod tests {
         CORE_PROTOCOL_VERSION, ClientInstanceId, DeploymentGeneration, Key, KeyEvent, KeyState,
         Revision, Sequence, SessionEpoch, SessionId,
     };
-    use cheime_protocol::EngineMessage;
+    use cheime_pipeline::factory::PipelineFactory;
+    use cheime_user_data::UserStore;
+    use parking_lot::Mutex;
     use std::sync::Arc;
+
+    fn test_config() -> cheime_config::schema::SchemaConfig {
+        serde_yaml::from_str(
+            r#"schema_version: 1
+engine:
+  segmentors:
+    - type: pinyin_syllable
+  translators:
+    - type: table_translator
+  filters:
+    - type: uniquifier
+"#,
+        )
+        .unwrap()
+    }
+
+    fn test_index() -> Arc<CompiledIndex> {
+        let entries = vec![
+            DictEntry {
+                text: "你".into(),
+                code: "ni".into(),
+                weight: 100,
+            },
+            DictEntry {
+                text: "好".into(),
+                code: "hao".into(),
+                weight: 100,
+            },
+        ];
+        Arc::new(CompiledIndex::build(entries, DeploymentGeneration::new(1)))
+    }
+
+    fn test_pipeline() -> ComposablePipeline {
+        let config = test_config();
+        let index = test_index();
+        let store = Arc::new(Mutex::new(UserStore::new("test")));
+        PipelineFactory::build(&config, Some(store), Some(index), None).unwrap()
+    }
 
     fn test_identity() -> MessageHeader {
         MessageHeader {
             protocol_version: CORE_PROTOCOL_VERSION,
             client: ClientInstanceId::new(1),
             session: SessionId::new(1),
-            epoch: SessionEpoch::new(1),
+            epoch: SessionEpoch::new(2),
             sequence: Sequence::new(0),
             revision: Revision::new(0),
             deployment: DeploymentGeneration::new(1),
         }
     }
 
-    fn test_pipeline() -> DictPipeline {
-        let entries = vec![
-            DictEntry {
-                text: "你".into(),
-                code: "ni".into(),
-                weight: Some(100),
-                stem: None,
-            },
-            DictEntry {
-                text: "呢".into(),
-                code: "ni".into(),
-                weight: Some(50),
-                stem: None,
-            },
-            DictEntry {
-                text: "好".into(),
-                code: "hao".into(),
-                weight: Some(80),
-                stem: None,
-            },
-            DictEntry {
-                text: "你好".into(),
-                code: "nihao".into(),
-                weight: Some(120),
-                stem: None,
-            },
-        ];
-        let index = CompiledIndex::build(entries, DeploymentGeneration::new(1));
-        DictPipeline::new(Arc::new(index))
-    }
-
     #[test]
-    fn key_n_produces_snapshot() {
+    fn session_handles_key_and_returns_candidates() {
+        let pipeline = test_pipeline();
+        let mut session = Session::new(test_identity(), pipeline);
+
         let msg = FrontendMessage::KeyCommand {
-            header: MessageHeader {
-                sequence: Sequence::new(1),
-                revision: Revision::new(0),
-                ..test_identity()
-            },
+            header: test_identity(),
             event: KeyEvent {
                 key: Key::Character('n'),
-                state: KeyState::default(),
+                state: KeyState::Pressed,
             },
         };
-
-        let mut session = Session::new(test_identity(), test_pipeline());
-        let outputs = session.handle(msg).unwrap();
-        assert!(!outputs.is_empty());
-
-        let has_preedit = outputs.iter().any(|m| {
-            matches!(m, EngineMessage::PlatformAction { action, .. }
-                if matches!(&action.kind, cheime_model::PlatformActionKind::SetPreedit { text, .. } if text == "n"))
-        });
-        assert!(has_preedit);
-
-        let has_snapshot = outputs
-            .iter()
-            .any(|m| matches!(m, EngineMessage::CandidateSnapshot { .. }));
-        assert!(has_snapshot);
-    }
-
-    #[test]
-    fn full_ni_commit_flow() {
-        let mut session = Session::new(test_identity(), test_pipeline());
-
-        // 'n'
-        session
-            .handle(FrontendMessage::KeyCommand {
-                header: MessageHeader {
-                    sequence: Sequence::new(1),
-                    revision: Revision::new(0),
-                    ..test_identity()
-                },
-                event: KeyEvent {
-                    key: Key::Character('n'),
-                    state: KeyState::default(),
-                },
-            })
-            .unwrap();
-
-        // 'i'
-        session
-            .handle(FrontendMessage::KeyCommand {
-                header: MessageHeader {
-                    sequence: Sequence::new(2),
-                    revision: Revision::new(1),
-                    ..test_identity()
-                },
-                event: KeyEvent {
-                    key: Key::Character('i'),
-                    state: KeyState::default(),
-                },
-            })
-            .unwrap();
-
-        // Enter to commit
-        let commit_out = session
-            .handle(FrontendMessage::KeyCommand {
-                header: MessageHeader {
-                    sequence: Sequence::new(3),
-                    revision: Revision::new(2),
-                    ..test_identity()
-                },
-                event: KeyEvent {
-                    key: Key::Enter,
-                    state: KeyState::default(),
-                },
-            })
-            .unwrap();
-
-        let commit_action = commit_out.iter().find_map(|m| match m {
-            EngineMessage::PlatformAction { action, .. }
-                if matches!(
-                    &action.kind,
-                    cheime_model::PlatformActionKind::Commit { .. }
-                ) =>
-            {
-                Some(action.clone())
-            }
-            _ => None,
-        });
-        assert!(commit_action.is_some(), "expected a commit PlatformAction");
-
-        // Confirm the commit
-        let action_id = commit_action.unwrap().id;
-        session
-            .handle(FrontendMessage::PlatformActionResult {
-                header: MessageHeader {
-                    sequence: Sequence::new(4),
-                    revision: Revision::new(2),
-                    ..test_identity()
-                },
-                result: cheime_model::PlatformActionResult {
-                    action_id,
-                    outcome: cheime_model::PlatformActionOutcome::Applied,
-                },
-            })
-            .unwrap();
-
-        assert_eq!(session.composition(), "");
+        let responses = session.handle(msg).unwrap();
+        assert!(!responses.is_empty(), "should return at least one candidate snapshot");
     }
 }

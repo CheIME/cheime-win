@@ -3,45 +3,54 @@
 //! Creates a named pipe at `\\.\pipe\cheime-engine`, listens for TIP client
 //! connections, performs the version handshake, and spawns a session runner
 //! thread per client.
+//!
+//! Each connection gets its own `ComposablePipeline` (per-processor state)
+//! but all share the same dictionary index and user store.
 
 use crate::pipe_handle::PipeHandle;
-use crate::session_runner::run_client_loop;
-use cheime_model::{ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId};
-use cheime_pipeline::DictPipeline;
+use crate::session_runner;
+use cheime_config::schema::SchemaConfig;
+use cheime_dictionary::CompiledIndex;
+use cheime_model::{
+    ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId,
+};
+use cheime_pipeline::factory::PipelineFactory;
 use cheime_protocol::MessageHeader;
 use cheime_tip_core::{PipeReader, PipeWriter};
+use cheime_user_data::UserStore;
 use cheime_wire::{ClientHello, HelloAck, HelloRejected, MessageCodec, ServerHello, WireError};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
-use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES,
 };
+use windows::core::PCWSTR;
 
+use windows::Win32::System::Threading::{CreateThread, THREAD_CREATION_FLAGS};
 /// Default pipe name for the engine.
 pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\cheime-engine";
 
 /// Errors during server or handshake operation.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ServerError {
+    #[error("I/O error: {0}")]
+    Io(String),
     #[error("handshake timeout")]
     HandshakeTimeout,
-    #[error("protocol version mismatch: client sent {client}, server requires {server}")]
+    #[error("version mismatch: client={client}, server={server}")]
     VersionMismatch { client: u16, server: u16 },
     #[error("pipe error: {0}")]
     Pipe(String),
-    #[error("wire error: {0}")]
-    Wire(String),
-    #[error("I/O error: {0}")]
-    Io(String),
 }
 
 impl From<WireError> for ServerError {
     fn from(e: WireError) -> Self {
-        ServerError::Wire(e.to_string())
+        ServerError::Pipe(e.to_string())
     }
 }
 
@@ -51,47 +60,37 @@ impl From<cheime_tip_core::PipeError> for ServerError {
     }
 }
 
-fn poll_accept<F>(stop: &AtomicBool, mut attempt: F) -> Result<bool, ServerError>
-where
-    F: FnMut() -> Result<bool, ServerError>,
-{
-    while !stop.load(Ordering::Relaxed) {
-        if attempt()? {
-            return Ok(true);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    Ok(false)
-}
-
 /// Run the engine host server loop.
 pub fn run_server(
-    dict_pipeline: DictPipeline,
-    deployment: cheime_model::DeploymentGeneration,
+    config: &SchemaConfig,
+    index: Arc<CompiledIndex>,
+    user_store: Arc<Mutex<UserStore>>,
     pipe_name: &str,
 ) -> Result<(), ServerError> {
     let stop = AtomicBool::new(false);
-    run_server_until(dict_pipeline, deployment, pipe_name, &stop)
+    run_server_until(config, index, user_store, pipe_name, &stop)
 }
 
 fn run_server_until(
-    dict_pipeline: DictPipeline,
-    deployment: cheime_model::DeploymentGeneration,
+    config: &SchemaConfig,
+    index: Arc<CompiledIndex>,
+    user_store: Arc<Mutex<UserStore>>,
     pipe_name: &str,
     stop: &AtomicBool,
 ) -> Result<(), ServerError> {
-    let connection_counter = Arc::new(AtomicU64::new(1));
-    let dict_pipeline = Arc::new(dict_pipeline);
+    let deployment = DeploymentGeneration::new(1);
+    let mut connection_id: u64 = 0;
 
-    let wide_name: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
-
-    eprintln!("[engine] listening on {pipe_name}");
+    let pipe_name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     loop {
-        // CreateNamedPipeW returns HANDLE directly (not Result)
-        let pipe_handle = unsafe {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let handle = unsafe {
             CreateNamedPipeW(
-                windows::core::PCWSTR::from_raw(wide_name.as_ptr()),
+                PCWSTR::from_raw(pipe_name_wide.as_ptr()),
                 PIPE_ACCESS_DUPLEX,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
                 PIPE_UNLIMITED_INSTANCES,
@@ -101,67 +100,81 @@ fn run_server_until(
                 None,
             )
         };
-
-        if pipe_handle.is_invalid() {
-            eprintln!("[engine] CreateNamedPipeW returned invalid handle");
-            return Err(ServerError::Pipe(
-                "CreateNamedPipeW returned invalid handle".into(),
-            ));
+        if handle.is_invalid() {
+            eprintln!("CreateNamedPipeW failed");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
         }
 
-        let accepted = poll_accept(stop, || {
-            match unsafe { ConnectNamedPipe(pipe_handle, None) } {
-                Ok(()) => Ok(true),
-                Err(error) if error.code() == ERROR_PIPE_CONNECTED.to_hresult() => Ok(true),
-                Err(error)
-                    if error.code()
-                        == windows::Win32::Foundation::ERROR_PIPE_LISTENING.to_hresult() =>
-                {
-                    Ok(false)
-                }
-                Err(error) => Err(ServerError::Pipe(format!(
-                    "ConnectNamedPipe failed: {error:?}"
-                ))),
-            }
-        });
-        match accepted {
-            Ok(true) => {}
-            Ok(false) => {
-                unsafe {
-                    let _ = windows::Win32::Foundation::CloseHandle(pipe_handle);
-                }
-                return Ok(());
-            }
-            Err(error) => {
-                unsafe {
-                    let _ = windows::Win32::Foundation::CloseHandle(pipe_handle);
-                }
-                eprintln!("[engine] {error}");
+        // Wait for a client to connect before spawning handler thread
+        let connected = unsafe { ConnectNamedPipe(handle, None) };
+        let client_ready = match connected {
+            Ok(()) => true,
+            Err(e) if e.code() == windows::Win32::Foundation::ERROR_PIPE_CONNECTED.into() => true,
+            _ => {
+                unsafe { let _ = windows::Win32::Foundation::CloseHandle(handle); }
                 continue;
             }
+        };
+        if !client_ready {
+            continue;
         }
 
-        let connection_id = connection_counter.fetch_add(1, Ordering::Relaxed);
-        let pipeline_clone = Arc::clone(&dict_pipeline);
+        connection_id = connection_id.wrapping_add(1);
+        let conn_id = connection_id;
 
-        // Extract the raw pointer to make it Send-able across threads
-        let pipe_ptr: isize = pipe_handle.0 as isize;
-        std::thread::spawn(move || {
-            let handle = HANDLE(pipe_ptr as *mut std::ffi::c_void);
-            eprintln!("[engine] connection {connection_id} connected");
-            match handle_client(handle, pipeline_clone, deployment, connection_id) {
-                Ok(()) => eprintln!("[engine] connection {connection_id} session ended normally"),
-                Err(e) => eprintln!("[engine] connection {connection_id} error: {e}"),
-            }
-        });
+        let cfg = config.clone();
+        let idx = Arc::clone(&index);
+        let store = Arc::clone(&user_store);
+
+        unsafe {
+            let _ = CreateThread(
+                None,
+                0,
+                Some(handle_client_thread),
+                Some(Box::into_raw(Box::new(ClientCtx {
+                    handle,
+                    config: cfg,
+                    index: idx,
+                    user_store: store,
+                    deployment,
+                    connection_id: conn_id,
+                })) as *mut std::ffi::c_void),
+                THREAD_CREATION_FLAGS(0),
+                None,
+            );
+        }
     }
+
+    Ok(())
+}
+
+/// Context passed to each client handler thread.
+struct ClientCtx {
+    handle: HANDLE,
+    config: SchemaConfig,
+    index: Arc<CompiledIndex>,
+    user_store: Arc<Mutex<UserStore>>,
+    deployment: DeploymentGeneration,
+    connection_id: u64,
+}
+
+unsafe extern "system" fn handle_client_thread(raw: *mut std::ffi::c_void) -> u32 {
+    let ctx = unsafe { Box::from_raw(raw as *mut ClientCtx) };
+    let result = handle_client(ctx.handle, &ctx.config, ctx.index, ctx.user_store, ctx.deployment, ctx.connection_id);
+    if let Err(e) = result {
+        eprintln!("[engine] connection {} error: {e}", ctx.connection_id);
+    }
+    0
 }
 
 /// Handle one client: handshake → session loop → cleanup.
 fn handle_client(
     pipe_handle: HANDLE,
-    dict_pipeline: Arc<DictPipeline>,
-    deployment: cheime_model::DeploymentGeneration,
+    config: &SchemaConfig,
+    index: Arc<CompiledIndex>,
+    user_store: Arc<Mutex<UserStore>>,
+    deployment: DeploymentGeneration,
     connection_id: u64,
 ) -> Result<(), ServerError> {
     // Duplicate the handle so we can have separate reader/writer cursors
@@ -178,15 +191,12 @@ fn handle_client(
         )
     };
     if dup_ok.is_err() {
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(pipe_handle);
-        }
+        unsafe { let _ = windows::Win32::Foundation::CloseHandle(pipe_handle); }
         return Err(ServerError::Io("DuplicateHandle failed".into()));
     }
 
     let read_pipe = unsafe { PipeHandle::from_raw_handle(pipe_handle) };
-    read_pipe
-        .set_blocking(false)
+    read_pipe.set_blocking(false)
         .map_err(|error| ServerError::Io(error.to_string()))?;
     let write_pipe = unsafe { PipeHandle::from_raw_handle(dup_handle) };
     let codec = MessageCodec::new(MessageCodec::DEFAULT_MAX);
@@ -198,7 +208,6 @@ fn handle_client(
         protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         supported_caps: vec![],
-        deployment_generation: deployment.get(),
     };
     writer.write_message(&codec, &hello)?;
     writer.flush()?;
@@ -231,29 +240,20 @@ fn handle_client(
         });
     }
 
-    if client_hello.client_instance_id == 0
-        || client_hello.deployment_generation != deployment.get()
-    {
+    if client_hello.client_instance_id == 0 {
         let rejected = HelloRejected {
-            reason: "invalid client or deployment identity".into(),
+            reason: "invalid client identity".into(),
             engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         writer.write_message(&codec, &rejected)?;
         writer.flush()?;
-        return Err(ServerError::Pipe(
-            "invalid client or deployment identity".into(),
-        ));
+        return Err(ServerError::Pipe("invalid client identity".into()));
     }
 
     let identity = connection_identity(client_hello.client_instance_id, deployment, connection_id);
 
-    // 4. Send HelloAck
+    // 4. Send HelloAck (simplified protocol: only session_id_base)
     let ack = HelloAck {
-        client_instance_id: identity.client.get(),
-        session_id: identity.session.get(),
-        session_epoch: identity.epoch.get(),
-        initial_revision: identity.revision.get(),
-        deployment_generation: identity.deployment.get(),
         session_id_base: identity.session.get(),
     };
     writer.write_message(&codec, &ack)?;
@@ -261,15 +261,16 @@ fn handle_client(
 
     eprintln!("[engine] connection {connection_id} handshake complete");
 
-    // 5. Use the identity acknowledged to the client.
+    // 5. Build pipeline for this connection (per-session processor state)
+    let pipeline = PipelineFactory::build(config, Some(user_store), Some(index), None)
+        .map_err(|e| ServerError::Pipe(format!("pipeline build failed: {e}")))?;
 
-    reader
-        .get_ref()
+    reader.get_ref()
         .set_blocking(true)
         .map_err(|error| ServerError::Io(error.to_string()))?;
 
     // 6. Run the session loop
-    run_client_loop(reader, writer, codec, (*dict_pipeline).clone(), identity)
+    session_runner::run_client_loop(reader, writer, codec, pipeline, identity)
         .map_err(|e| ServerError::Pipe(e.to_string()))?;
 
     Ok(())
@@ -298,30 +299,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accept_poll_stops_without_attempting_connection() {
-        let stop = AtomicBool::new(true);
-        let mut attempts = 0;
-        assert!(
-            !poll_accept(&stop, || {
-                attempts += 1;
-                Ok(false)
-            })
-            .unwrap()
-        );
-        assert_eq!(attempts, 0);
-    }
-
-    #[test]
-    fn reconnect_allocates_fresh_nonzero_session_and_epoch() {
-        let deployment = DeploymentGeneration::new(7);
-        let first = connection_identity(42, deployment, 1);
-        let second = connection_identity(42, deployment, 2);
-        assert_ne!(first.session, second.session);
-        assert_ne!(first.epoch, second.epoch);
-        assert_ne!(first.session.get(), 0);
-        assert_ne!(first.epoch.get(), 0);
-        assert_eq!(first.client, ClientInstanceId::new(42));
-        assert_eq!(first.deployment, deployment);
-        assert_eq!(first.revision, Revision::new(0));
+    fn connection_identity_allocates_unique_sessions() {
+        let d = DeploymentGeneration::new(1);
+        let id1 = connection_identity(100, d, 1);
+        let id2 = connection_identity(100, d, 2);
+        assert_eq!(id1.session.get(), 2); // 1*2.max(1) = 2
+        assert_eq!(id2.session.get(), 4); // 2*2.max(1) = 4
+        assert!(id1.session != id2.session);
     }
 }

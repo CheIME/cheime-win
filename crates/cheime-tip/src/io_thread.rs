@@ -238,17 +238,14 @@ fn run_client_handshake(
     if server_hello.protocol_version != cheime_model::CORE_PROTOCOL_VERSION {
         return Err("version mismatch".into());
     }
-
     let client_hello = ClientHello {
         protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
         client_instance_id: client_id,
         client_caps: vec![],
-        deployment_generation: server_hello.deployment_generation,
     };
     writer
         .write_message(codec, &client_hello)
         .map_err(|e| format!("write ClientHello: {e}"))?;
-    writer.flush().map_err(|e| format!("flush: {e}"))?;
 
     let ack: HelloAck = reader
         .read_message_until(codec, deadline)
@@ -260,11 +257,16 @@ fn run_client_handshake(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AcknowledgedState {
+    /// Client identity assigned by TIP at connect.
     client: cheime_model::ClientInstanceId,
+    /// Session base id from engine handshake.
     session: cheime_model::SessionId,
+    /// Session epoch, initialized to session+1 (matches engine formula).
     epoch: cheime_model::SessionEpoch,
+    /// Current revision (updated by observe_engine).
     revision: cheime_model::Revision,
-    deployment: cheime_model::DeploymentGeneration,
+    /// Deployment generation (lazily populated from first engine message).
+    deployment: Option<cheime_model::DeploymentGeneration>,
 }
 
 struct FrontendSession {
@@ -274,12 +276,11 @@ struct FrontendSession {
 
 impl FrontendSession {
     fn new(state: AcknowledgedState) -> Self {
-        Self {
-            state,
-            next_sequence: 1,
-        }
+        Self { state, next_sequence: 1 }
     }
 
+    /// Validate engine messages against session identity.
+    /// On first message, captures deployment from engine header.
     fn observe_engine(&mut self, message: &EngineMessage) -> Result<(), String> {
         let header = match message {
             EngineMessage::SessionOpened { header }
@@ -292,9 +293,14 @@ impl FrontendSession {
             || header.client != self.state.client
             || header.session != self.state.session
             || header.epoch != self.state.epoch
-            || header.deployment != self.state.deployment
         {
             return Err("engine identity mismatch".into());
+        }
+        // Lazy deployment capture on first valid message
+        if self.state.deployment.is_none() {
+            self.state.deployment = Some(header.deployment);
+        } else if header.deployment != self.state.deployment.unwrap() {
+            return Err("deployment changed mid-session".into());
         }
         if header.revision < self.state.revision {
             return Err("stale engine revision".into());
@@ -304,6 +310,7 @@ impl FrontendSession {
     }
 
     fn prepare(&mut self, message: FrontendMessage) -> FrontendMessage {
+        let deployment = self.state.deployment.unwrap_or(cheime_model::DeploymentGeneration::new(1));
         let header = cheime_protocol::MessageHeader {
             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
             client: self.state.client,
@@ -311,21 +318,15 @@ impl FrontendSession {
             epoch: self.state.epoch,
             sequence: cheime_model::Sequence::new(self.next_sequence),
             revision: self.state.revision,
-            deployment: self.state.deployment,
+            deployment,
         };
         self.next_sequence = self.next_sequence.saturating_add(1);
         match message {
             FrontendMessage::OpenSession { .. } => FrontendMessage::OpenSession { header },
             FrontendMessage::CloseSession { .. } => FrontendMessage::CloseSession { header },
-            FrontendMessage::KeyCommand { event, .. } => {
-                FrontendMessage::KeyCommand { header, event }
-            }
-            FrontendMessage::UiCommand { command, .. } => {
-                FrontendMessage::UiCommand { header, command }
-            }
-            FrontendMessage::PlatformActionResult { result, .. } => {
-                FrontendMessage::PlatformActionResult { header, result }
-            }
+            FrontendMessage::KeyCommand { event, .. } => FrontendMessage::KeyCommand { header, event },
+            FrontendMessage::UiCommand { command, .. } => FrontendMessage::UiCommand { header, command },
+            FrontendMessage::PlatformActionResult { result, .. } => FrontendMessage::PlatformActionResult { header, result },
         }
     }
 }
@@ -338,35 +339,23 @@ fn validate_handshake(
     if server.protocol_version != cheime_model::CORE_PROTOCOL_VERSION {
         return Err("protocol mismatch".into());
     }
-    if requested_client == 0 || ack.client_instance_id != requested_client {
-        return Err("client identity mismatch".into());
+    if requested_client == 0 || ack.session_id_base == 0 {
+        return Err("invalid identity".into());
     }
-    if ack.session_id == 0 || ack.session_epoch == 0 {
-        return Err("zero session identity".into());
-    }
-    if server.deployment_generation == 0
-        || ack.deployment_generation != server.deployment_generation
-    {
-        return Err("deployment mismatch".into());
-    }
+    // session_id_base = engine-assigned session; epoch = session + 1 (matches engine formula)
+    let session = ack.session_id_base;
+    let epoch = session.saturating_add(1);
     Ok(AcknowledgedState {
-        client: cheime_model::ClientInstanceId::new(ack.client_instance_id),
-        session: cheime_model::SessionId::new(ack.session_id),
-        epoch: cheime_model::SessionEpoch::new(ack.session_epoch),
-        revision: cheime_model::Revision::new(ack.initial_revision),
-        deployment: cheime_model::DeploymentGeneration::new(ack.deployment_generation),
+        client: cheime_model::ClientInstanceId::new(requested_client),
+        session: cheime_model::SessionId::new(session),
+        epoch: cheime_model::SessionEpoch::new(epoch),
+        revision: cheime_model::Revision::new(0),
+        deployment: None, // populated from first engine message
     })
 }
-
 #[cfg(test)]
 #[derive(Deserialize)]
 struct AckEnvelope {
-    client_instance_id: u64,
-    session_id: u64,
-    session_epoch: u64,
-    initial_revision: u64,
-    deployment_generation: u64,
-    #[serde(default)]
     session_id_base: u64,
 }
 
@@ -379,15 +368,9 @@ fn decode_ack_response(codec: &MessageCodec, payload: &[u8]) -> Result<HelloAck,
         .decode_handshake(payload)
         .map_err(|e| format!("malformed or rejected handshake response: {e}"))?;
     Ok(HelloAck {
-        client_instance_id: value.client_instance_id,
-        session_id: value.session_id,
-        session_epoch: value.session_epoch,
-        initial_revision: value.initial_revision,
-        deployment_generation: value.deployment_generation,
         session_id_base: value.session_id_base,
     })
 }
-
 fn duplicate_handle(
     raw: std::os::windows::io::RawHandle,
 ) -> Option<crate::pipe_handle::PipeHandle> {
