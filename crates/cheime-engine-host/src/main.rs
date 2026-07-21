@@ -75,7 +75,7 @@ fn load_index(dict_dir: &PathBuf) -> Arc<CompiledIndex> {
         .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
         .unwrap_or_default();
     let cache = DictCache::new(data_dir().join("cache"));
-    match cache.load_or_build(&files, "dictionaries", &[DictColumn::Text, DictColumn::Code], cheime_model::DeploymentGeneration::new(1)) {
+    match cache.load_or_build(&files, "dictionaries", &[DictColumn::Text, DictColumn::Code, DictColumn::Weight], cheime_model::DeploymentGeneration::new(1)) {
         Ok(idx) => {
             eprintln!("Loaded {} entries", idx.total_entries);
             Arc::new(idx)
