@@ -232,10 +232,6 @@ try {
         Write-Host "[guest] Post-test log check skipped: $_"
     }
 
-} catch {
-    Write-Error "FAILED: $_"
-    $cleanupErrors += "Phase failed: $_"
-} finally {
     # ── Cleanup ─────────────────────────────────────────────────────────────
     Write-Host "`n=== Cleanup ===" -ForegroundColor Cyan
 
