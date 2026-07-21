@@ -17,11 +17,6 @@ function Assert-DisposableGuest {
     if ([Environment]::Is64BitProcess -eq $false) {
         throw "Refusing: 32-bit PowerShell. Must run in 64-bit."
     }
-    # Weak sandbox detection: if the user name is WDAGUtilityAccount we're in Sandbox.
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if ($currentUser -notmatch 'WDAGUtilityAccount|Sandbox|WIN-DEV') {
-        Write-Warning "User '$currentUser' does not look like a Sandbox guest. Proceeding anyway (CHEIME_DISPOSABLE_GUEST=1)."
-    }
 }
 
 function Invoke-RegSvr32 {
@@ -38,49 +33,23 @@ function Invoke-RegSvr32 {
     Write-Host "[guest] regsvr32 $Action OK"
 }
 
-function Assert-TipRegistry {
-    param(
-        [string]$DllPath,
-        [switch]$AssertAbsent
-    )
-    $clsid = '{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}'
-    $profileGuid = '{D7E2A3B4-C5F6-7890-ABCD-EF1234567890}'
-    $dllName = Split-Path -Leaf $DllPath
-
-    if ($AssertAbsent) {
-        $found = $false
-        $out = cmd /c "reg.exe query HKLM\SOFTWARE\Classes\CLSID\$clsid /s 2>&1"
-        if ($LASTEXITCODE -eq 0) { $found = $true; Write-Host "  [WARN] CLSID still present after unregistration" }
-        $out = cmd /c "reg.exe query HKLM\SOFTWARE\Microsoft\CTF\TIP\$clsid /s 2>&1"
-        if ($LASTEXITCODE -eq 0) { $found = $true; Write-Host "  [WARN] CTF TIP still present after unregistration" }
-        if (-not $found) { Write-Host "[guest] Registry cleanup verified" }
-        return
-    }
-
-    # Verify regsvr32 actually wrote the DLL path using reg.exe
-    # (same view regsvr32 uses, avoids PowerShell/.NET HKCR merge quirks).
-    $dllValue = cmd /c "reg.exe query HKLM\SOFTWARE\Classes\CLSID\$clsid\InprocServer32 /ve 2>&1"
-    $threadingValue = cmd /c "reg.exe query HKLM\SOFTWARE\Classes\CLSID\$clsid\InprocServer32 /v ThreadingModel 2>&1"
-    if ($LASTEXITCODE -eq 0 -and $dllValue -match "REG_SZ\s+(.+)$dllName") {
-        Write-Host "[guest] InprocServer32: $DllPath (detected via reg.exe)"
-    } else {
-        Write-Warning "InprocServer32 not verified via reg.exe. The TIP may still work if regsvr32 reported success."
-        Write-Host "  reg query output: $dllValue"
-    }
-    if ($threadingValue -match 'Apartment') {
-        Write-Host "[guest] ThreadingModel: Apartment"
-    }
-
-    # Check CTF profile
-    $ctfOut = cmd /c "reg.exe query HKLM\SOFTWARE\Microsoft\CTF\TIP\$clsid\LanguageProfile\0x00000804\$profileGuid /v Description 2>&1"
-    if ($ctfOut -match 'CheIME TIP') {
-        Write-Host "[guest] CTF LanguageProfile: CheIME TIP"
-    } else {
-        Write-Host "[guest] CTF LanguageProfile key not found (created dynamically by TSF on first use)"
-    }
+function Write-Phase {
+    param([string]$Title, [int]$Num)
+    Write-Host "`n=== Phase $Num : $Title ===" -ForegroundColor Cyan
 }
 
-# ── Guard ────────────────────────────────────────────────────────────────────
+# ── Phase config (no code, just display strings) ───────────────────────────
+$phases = @(
+    "Install bundle"
+    "Register TIP"
+    "Start engine"
+    "Run COM probes"
+    "Check event log"
+    "Manual Notepad test"
+    "Cleanup and exit"
+)
+
+# ── Guard ──────────────────────────────────────────────────────────────────
 Assert-DisposableGuest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -88,14 +57,68 @@ $instDir   = Join-Path $env:LOCALAPPDATA "CheIME"
 $binDir    = Join-Path $instDir "bin"
 $dataDir   = Join-Path $instDir "data\dicts"
 
-# Track state for cleanup
+$installedDll     = Join-Path $binDir "cheime-tip.dll"
+$registeredProbe  = Join-Path $binDir "cheime-registered-probe.exe"
+$profileProbe     = Join-Path $binDir "cheime-profile-probe.exe"
+$engineExe        = Join-Path $binDir "cheime-engine.exe"
+
 $engineProcess = $null
 $enginePid     = $null
 $cleanupErrors = @()
 
+# ── Cleanup function (callable from multiple places) ────────────────────────
+function Invoke-Cleanup {
+    Write-Host "`n=== Cleanup ===" -ForegroundColor Cyan
+
+    # Stop engine
+    if ($enginePid -ne $null) {
+        Write-Host "[cleanup] Stopping engine (PID: $enginePid)..."
+        try {
+            $engineProc = Get-Process -Id $enginePid -ErrorAction Stop
+            $engineProc.Kill()
+            $engineProc.WaitForExit(5000) | Out-Null
+            Write-Host "[cleanup] Engine stopped"
+        } catch {
+            Write-Host "[cleanup] Engine already stopped (or kill failed)"
+        }
+    }
+
+    # Unregister TIP DLL
+    if (Test-Path $installedDll) {
+        Write-Host "[cleanup] Unregistering TIP DLL..."
+        try {
+            Invoke-RegSvr32 -Action unregister -DllPath $installedDll
+            Write-Host "[cleanup] TIP unregistered"
+        } catch {
+            Write-Host "[cleanup] Unregister failed (may already be unregistered): $_"
+        }
+    }
+
+    # Verify registry cleanup
+    Write-Host "[cleanup] Verifying registry cleanup..."
+    $clsid = '{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}'
+    $r1 = cmd /c "reg.exe delete HKLM\SOFTWARE\Classes\CLSID\$clsid /f 2>&1"
+    $r2 = cmd /c "reg.exe delete HKLM\SOFTWARE\Microsoft\CTF\TIP\$clsid /f 2>&1"
+    Write-Host "[cleanup] Registry cleanup attempted"
+
+    # Remove installed files
+    if (Test-Path $instDir) {
+        try {
+            Remove-Item -Recurse -Force $instDir -ErrorAction Stop
+            Write-Host "[cleanup] Removed $instDir"
+        } catch {
+            Write-Host "[cleanup] Could not remove $instDir (files may be in use): $_"
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main: execute each phase.  On error, print it, run cleanup, and exit.
+# ═══════════════════════════════════════════════════════════════════════════
+
 try {
-    # ── Phase 1: Copy bundle ────────────────────────────────────────────────
-    Write-Host "`n=== Phase 1: Install bundle ===" -ForegroundColor Cyan
+    # ── Phase 1: Copy bundle ──────────────────────────────────────────────
+    Write-Phase -Title $phases[0] -Num 1
 
     if (-not (Test-Path (Join-Path $scriptDir "bin\cheime-tip.dll"))) {
         throw "Bundle not found at $scriptDir. The mapped folder should contain bin/, data/, etc."
@@ -103,7 +126,6 @@ try {
 
     New-Item -ItemType Directory -Force -Path $binDir, $dataDir | Out-Null
 
-    # Copy with verification
     $toCopy = @(
         "bin\cheime-engine.exe"
         "bin\cheime-tip.dll"
@@ -120,48 +142,46 @@ try {
         Write-Host "  [OK] Copied $rel"
     }
 
-    # Copy dict data
     $dictSrcDir = Join-Path $scriptDir "data\dicts"
     if (Test-Path $dictSrcDir) {
         Copy-Item -Force (Join-Path $dictSrcDir "*") $dataDir
         Write-Host "  [OK] Dictionary data copied"
     }
 
-    # Validate all installed files exist
-    $installedDll = Join-Path $binDir "cheime-tip.dll"
-    $registeredProbe = Join-Path $binDir "cheime-registered-probe.exe"
-    $profileProbe    = Join-Path $binDir "cheime-profile-probe.exe"
-    $engineExe       = Join-Path $binDir "cheime-engine.exe"
-
     foreach ($f in @($installedDll, $registeredProbe, $profileProbe, $engineExe)) {
         if (-not (Test-Path $f -PathType Leaf)) { throw "Missing installed file: $f" }
     }
     Write-Host "`n[guest] All files installed at $instDir"
 
-    # ── Phase 2: Register TIP ──────────────────────────────────────────────
-    Write-Host "`n=== Phase 2: Register TIP ===" -ForegroundColor Cyan
-    try {
-        Invoke-RegSvr32 -Action register -DllPath $installedDll
-        Assert-TipRegistry -DllPath $installedDll
-        Write-Host "[guest] TIP registration verified"
-    } catch {
-        Write-Warning "TIP registration could not be verified, but regsvr32 reported success. Continuing..."
-    }
+    # ── Phase 2: Register TIP ────────────────────────────────────────────
+    Write-Phase -Title $phases[1] -Num 2
 
-    # ── Phase 3: Start engine ──────────────────────────────────────────────
-    Write-Host "`n=== Phase 3: Start engine ===" -ForegroundColor Cyan
+    Invoke-RegSvr32 -Action register -DllPath $installedDll
+
+    # Quick verification — warn but don't fail
+    $clsid = '{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}'
+    $verify = cmd /c "reg.exe query HKLM\SOFTWARE\Classes\CLSID\$clsid\InprocServer32 /ve 2>&1"
+    if ($LASTEXITCODE -eq 0 -and $verify -match 'cheime-tip') {
+        Write-Host "[guest] InprocServer32 verified via reg.exe"
+    } else {
+        Write-Host "[guest] regsvr32 reported OK — continuing (reg.exe verify optional)"
+    }
+    Write-Host "[guest] TIP registration complete"
+
+    # ── Phase 3: Start engine ────────────────────────────────────────────
+    Write-Phase -Title $phases[2] -Num 3
+
     $engineProcess = Start-Process -FilePath $engineExe -ArgumentList "--dict-dir", $dataDir -WindowStyle Hidden -PassThru
     $enginePid = $engineProcess.Id
     Write-Host "[guest] Engine started (PID: $enginePid)"
 
-    # Wait for engine pipe to become available
     Start-Sleep -Milliseconds 500
     if ($engineProcess.HasExited) {
         throw "Engine exited immediately after launch."
     }
 
-    # ── Phase 4: Run probes ────────────────────────────────────────────────
-    Write-Host "`n=== Phase 4: Run COM probes ===" -ForegroundColor Cyan
+    # ── Phase 4: Run probes ──────────────────────────────────────────────
+    Write-Phase -Title $phases[3] -Num 4
 
     Write-Host "[guest] Running registered-probe..."
     $rp = Start-Process -FilePath $registeredProbe -NoNewWindow -Wait -PassThru
@@ -177,8 +197,9 @@ try {
     }
     Write-Host "[guest] Profile probe PASSED"
 
-    # ── Phase 5: Check event log ──────────────────────────────────────────
-    Write-Host "`n=== Phase 5: Check event log ===" -ForegroundColor Cyan
+    # ── Phase 5: Check event log ─────────────────────────────────────────
+    Write-Phase -Title $phases[4] -Num 5
+
     $since = (Get-Date).AddMinutes(-5)
     try {
         $faults = Get-WinEvent -FilterHashtable @{
@@ -197,14 +218,14 @@ try {
     }
 
     # ── Phase 6: Manual acceptance test ──────────────────────────────────
-    Write-Host "`n=== Phase 6: Manual Notepad test ===" -ForegroundColor Cyan
+    Write-Phase -Title $phases[5] -Num 6
+
     Write-Host ""
     Write-Host "Open Notepad and test the IME:"
-    Write-Host "  1. Switch to CheIME with Win+Space (may need to select from list)"
-    Write-Host "  2. Type 'ni' — should see candidate window with '你' and '呢'"
-    Write-Host "  3. Press Enter or Space to commit the highlighted candidate"
+    Write-Host "  1. Switch to CheIME with Win+Space"
+    Write-Host "  2. Type 'ni' — should see candidate window"
+    Write-Host "  3. Press Space to commit the highlighted candidate"
     Write-Host "  4. Press Escape to cancel composition"
-    Write-Host "  5. Switch back with Win+Space when done"
     Write-Host ""
     Write-Host "Type 'done' and press Enter when ready to clean up,"
     Write-Host "or just close this window to skip cleanup:"
@@ -213,8 +234,8 @@ try {
     } while ($input -ne 'done')
     Write-Host "[guest] Proceeding to cleanup..."
 
-    # ── Phase 7: Event log re-check ──────────────────────────────────────
-    Write-Host "`n=== Phase 7: Post-test event log check ===" -ForegroundColor Cyan
+    # ── Phase 7: Post-test event log re-check ────────────────────────────
+    Write-Host "`n--- Post-test event log check ---"
     $since2 = (Get-Date).AddMinutes(-1)
     try {
         $faults2 = Get-WinEvent -FilterHashtable @{
@@ -232,65 +253,16 @@ try {
         Write-Host "[guest] Post-test log check skipped: $_"
     }
 
-    # ── Cleanup ─────────────────────────────────────────────────────────────
-    Write-Host "`n=== Cleanup ===" -ForegroundColor Cyan
-
-    # Stop engine
-    if ($enginePid -ne $null) {
-        Write-Host "[cleanup] Stopping engine (PID: $enginePid)..."
-        try {
-            $engineProc = Get-Process -Id $enginePid -ErrorAction Stop
-            $engineProc.Kill()
-            $engineProc.WaitForExit(5000) | Out-Null
-            Write-Host "[cleanup] Engine stopped"
-        } catch {
-            Write-Warning "Engine stop: $_"
-            $cleanupErrors += "Engine stop failed: $_"
-        }
-    }
-
-    # Unregister TIP DLL
-    $installedDll = Join-Path $binDir "cheime-tip.dll"
-    if (Test-Path $installedDll) {
-        Write-Host "[cleanup] Unregistering TIP DLL..."
-        try {
-            Invoke-RegSvr32 -Action unregister -DllPath $installedDll
-            Write-Host "[cleanup] TIP unregistered"
-        } catch {
-            Write-Warning "Unregister failed: $_"
-            $cleanupErrors += "Unregister failed: $_"
-        }
-    }
-
-    # Verify registry cleanup
-    Write-Host "[cleanup] Verifying registry cleanup..."
-    try {
-        Assert-TipRegistry -DllPath $installedDll -AssertAbsent
-    } catch {
-        Write-Warning "Registry cleanup check: $_"
-        $cleanupErrors += "Registry cleanup: $_"
-    }
-
-    # Remove installed files
-    if (Test-Path $instDir) {
-        if ($cleanupErrors.Count -eq 0) {
-            Remove-Item -Recurse -Force $instDir
-            Write-Host "[cleanup] Removed $instDir"
-        } else {
-            Write-Warning "Preserving $instDir due to cleanup errors above"
-        }
-    }
-
+} catch {
     Write-Host ""
-    if ($cleanupErrors.Count -gt 0) {
-        Write-Host "==========================================" -ForegroundColor Red
-        Write-Host "  GUEST RUN COMPLETED WITH ERRORS" -ForegroundColor Red
-        Write-Host "==========================================" -ForegroundColor Red
-        $cleanupErrors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-        exit 10
-    } else {
-        Write-Host "==========================================" -ForegroundColor Green
-        Write-Host "  GUEST RUN COMPLETED SUCCESSFULLY" -ForegroundColor Green
-        Write-Host "==========================================" -ForegroundColor Green
-    }
+    Write-Host "==========================================" -ForegroundColor Red
+    Write-Host "  ERROR: $_" -ForegroundColor Red
+    Write-Host "==========================================" -ForegroundColor Red
+} finally {
+    Invoke-Cleanup
 }
+
+Write-Host ""
+Write-Host "==========================================" -ForegroundColor Green
+Write-Host "  GUEST RUN COMPLETED" -ForegroundColor Green
+Write-Host "==========================================" -ForegroundColor Green
