@@ -126,6 +126,8 @@ engine:
   translators:
     - type: table
       dictionary: test_dict
+    - type: emoji
+      emoji_data: data/emoji.txt
   filters:
     - type: uniquifier
 "#).unwrap();

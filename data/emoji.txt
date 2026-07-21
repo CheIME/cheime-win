@@ -4804,3 +4804,39 @@ Vs.	Vs. 🆚
 英格兰	英格兰 🏴󠁧󠁢󠁥󠁮󠁧󠁿
 苏格兰	苏格兰 🏴󠁧󠁢󠁳󠁣󠁴󠁿
 威尔士	威尔士 🏴󠁧󠁢󠁷󠁬󠁳󠁿
+# ── Pinyin shortcuts (auto-generated) ─────────────────────────────────
+nihao	👋
+ni hao	👋
+xiao	😀
+haha	😀
+daxiao	😂
+weixiao	😊
+xihuan	😍
+ai	❤️
+xin	❤️
+ku	😭
+shengqi	😡
+zan	👍
+huishou	👋
+cai	👎
+guzhang	👏
+qidao	🙏
+jiayou	💪
+woshou	🤝
+shengli	✌️
+huo	🔥
+re	🔥
+xing	⭐
+qian	💰
+qingzhu	🎉
+shengri	🎂
+liwu	🎁
+dengpao	💡
+lianjie	🔗
+biji	📝
+manfen	💯
+wancheng	✅
+cuowu	❌
+jinggao	⚠️
+jinzhi	🚫
+wenhao	❓
