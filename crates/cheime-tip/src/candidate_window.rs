@@ -325,7 +325,9 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
                     x: rc.left,
                     y: rc.bottom,
                 };
-                unsafe { let _ = ClientToScreen(hwnd, &mut screen_point); };
+                unsafe {
+                    let _ = ClientToScreen(hwnd, &mut screen_point);
+                };
                 tsf_log(&format!(
                     "[CheIME] GetGUIThreadInfo: caret=({}, {}) screen=({}, {})",
                     rc.left, rc.bottom, screen_point.x, screen_point.y
