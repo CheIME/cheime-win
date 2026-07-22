@@ -206,62 +206,15 @@ fn handle_commit(
     tsf_log(&format!(
         "[CheIME] handle_commit START text={text:?} ec={ec}"
     ));
-    let result = 'work: {
-        let comp_mutex = unsafe { &*composition_ptr };
-        let guard = match comp_mutex.lock() {
-            Ok(g) => g,
-            Err(_) => break 'work Err("composition mutex poisoned".into()),
-        };
-        let comp = match guard.as_ref() {
-            Some(c) => c,
-            None => {
-                tsf_log(
-                    "[CheIME] commit: NO ACTIVE COMPOSITION — falling back to commit_at_selection",
-                );
-                break 'work commit_at_selection(ec, context, text);
-            }
-        };
-        let range = match unsafe { comp.GetRange() } {
-            Ok(r) => r,
-            Err(e) => break 'work Err(format!("GetRange: {e}")),
-        };
-
-        let text_wide: Vec<u16> = text.encode_utf16().collect();
-        if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
-            break 'work Err(format!("SetText: {e}"));
-        }
-        if let Err(e) = unsafe { range.Collapse(ec, TF_ANCHOR_END) } {
-            break 'work Err(format!("Collapse: {e}"));
-        }
-
-        // Position cursor at end of committed text.
-        let sel = TF_SELECTION {
-            range: std::mem::ManuallyDrop::new(Some(range)),
-            style: windows::Win32::UI::TextServices::TF_SELECTIONSTYLE {
-                ase: windows::Win32::UI::TextServices::TfActiveSelEnd(0),
-                fInterimChar: BOOL(0),
-            },
-        };
-        if let Err(e) = unsafe { context.SetSelection(ec, &[sel]) } {
-            break 'work Err(format!("SetSelection: {e}"));
-        }
-
-        drop(guard);
-        match end_active_composition(ec, composition_ptr) {
-            Ok(()) => {
-                tsf_log("[CheIME] handle_commit: end_active_composition OK");
-            }
-            Err(e) => {
-                tsf_log(&format!(
-                    "[CheIME] handle_commit: end_active_composition FAILED: {e}"
-                ));
-                break 'work Err(e);
-            }
-        }
+    // Always use commit_at_selection — insert text at cursor, then end composition.
+    // The ITfComposition from StartComposition may not survive across edit sessions
+    // when no sink is provided, so we avoid relying on it for commit.
+    let result = commit_at_selection(ec, context, text);
+    if result.is_ok() {
+        // Clean up composition state regardless
+        let _ = end_active_composition(ec, composition_ptr);
         tsf_log("[CheIME] handle_commit SUCCESS");
-        Ok(())
-    };
-
+    }
     tsf_log(&format!("[CheIME] handle_commit RESULT: {result:?}"));
     send_result(action, channel_ptr, &result);
     S_OK

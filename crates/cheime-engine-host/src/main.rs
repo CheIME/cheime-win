@@ -187,7 +187,7 @@ engine:
 
     eprintln!("stdin mode ready. Type pinyin (one letter per line) and press Enter.");
     let stdin = io::stdin();
-    for line in stdin.lock().lines().flatten() {
+    for line in stdin.lock().lines().map_while(Result::ok) {
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
