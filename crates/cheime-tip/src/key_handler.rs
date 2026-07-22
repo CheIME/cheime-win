@@ -297,12 +297,28 @@ mod tests {
         );
         // Enter passes through when no composition
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_RETURN, false, false, false, false),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_RETURN,
+                false,
+                false,
+                false,
+                false
+            ),
             KeyAdmission::PassThrough
         );
         // Enter is handled when composition exists
         assert_eq!(
-            check_key(InputMode::Chinese, true, VK_RETURN, false, false, false, true),
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_RETURN,
+                false,
+                false,
+                false,
+                true
+            ),
             KeyAdmission::Handled
         );
         assert_eq!(
