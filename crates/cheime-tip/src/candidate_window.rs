@@ -415,6 +415,14 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             }
         }
 
+        // Hide window when there's no composition (e.g. after Backspace clears all)
+        if boxed.preedit.is_empty() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            return LRESULT(0);
+        }
+
         if let Ok(mut st) = ctx.snapshot.lock() {
             *st = Some((*boxed, rows));
         }
