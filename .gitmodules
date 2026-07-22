@@ -1,3 +1,6 @@
 [submodule "cheime-core"]
 	path = cheime-core
 	url = https://github.com/CheIME/cheime-core.git
+[submodule "common"]
+	path = common
+	url = git@github.com:CheIME/common.git
