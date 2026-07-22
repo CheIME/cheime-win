@@ -28,7 +28,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
-    TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
+    TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HMENU,
@@ -362,16 +362,41 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
 }
 
 /// Try GetTextExt via TSF edit session.
+/// Tries composition range first, then falls back to selection range.
 fn try_get_text_ext(ctx: &WindowContext) -> Option<(i32, i32)> {
-    let range = {
-        let comp_guard = ctx.composition.lock().ok()?;
-        let comp = comp_guard.as_ref()?;
-        unsafe { comp.GetRange() }.ok()?
-    };
-
     let doc = unsafe { ctx.thread_mgr.GetFocus() }.ok()?;
     let context = unsafe { doc.GetTop() }.ok()?;
     let view = unsafe { context.GetActiveView() }.ok()?;
+
+    // Try composition range first
+    let range = {
+        let comp_guard = ctx.composition.lock().ok()?;
+        comp_guard
+            .as_ref()
+            .and_then(|comp| unsafe { comp.GetRange() }.ok())
+    };
+
+    // If no composition range, use current selection range
+    let range = match range {
+        Some(r) => r,
+        None => {
+            use windows::Win32::UI::TextServices::{TF_DEFAULT_SELECTION, TF_SELECTION};
+            let mut sel = [TF_SELECTION::default()];
+            let mut fetched = 0u32;
+            if unsafe {
+                context.GetSelection(0xFFFFFFFFu32, TF_DEFAULT_SELECTION, &mut sel, &mut fetched)
+            }
+            .is_err()
+                || fetched == 0
+            {
+                return None;
+            }
+            unsafe { sel[0].range.as_ref()?.Clone() }.ok()?
+        }
+    };
+
+    // Collapse to start for reliable point-based extent
+    let _ = unsafe { range.Collapse(0, TF_ANCHOR_START) };
 
     let result = Cell::new(None::<RECT>);
     let session = TextExtentSession::new(view, range, &result as *const Cell<Option<RECT>>);
