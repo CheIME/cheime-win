@@ -288,10 +288,13 @@ fn handle_set_preedit(
 
         let range = match comp_guard.as_ref() {
             // Active composition — get range from the composition object.
-            Some(comp) => match unsafe { comp.GetRange() } {
-                Ok(r) => r,
-                Err(e) => break 'work Err(format!("GetRange: {e}")),
-            },
+            Some(comp) => {
+                tsf_log("[CheIME] SetPreedit: reusing existing composition");
+                match unsafe { comp.GetRange() } {
+                    Ok(r) => r,
+                    Err(e) => break 'work Err(format!("GetRange: {e}")),
+                }
+            }
             // No composition yet — get current selection as insertion point.
             None => {
                 let mut selection = [zeroed_selection()];
@@ -328,10 +331,16 @@ fn handle_set_preedit(
                     Ok(c) => c,
                     Err(_) => break 'work Err("cast to ITfContextComposition failed".into()),
                 };
-                *comp_guard = match unsafe {
+                match unsafe {
                     ctx_comp.StartComposition(ec, &cloned, Option::<&ITfCompositionSink>::None)
                 } {
-                    Ok(c) => Some(c),
+                    Ok(c) => {
+                        tsf_log(&format!(
+                            "[CheIME] SetPreedit: StartComposition OK, comp_is_some={}",
+                            true
+                        ));
+                        *comp_guard = Some(c);
+                    }
                     Err(e) => break 'work Err(format!("StartComposition: {e}")),
                 };
                 cloned
