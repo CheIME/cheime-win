@@ -51,9 +51,23 @@ Set-Content -Path $wsbFile -Value $wsbContent -NoNewline -Encoding utf8
 Write-Host "`n=== Generated WSB config ===" -ForegroundColor Cyan
 Write-Host "  Bundle: $bundleDir"
 Write-Host "  WSB:    $wsbFile"
-Write-Host "`nLaunching Windows Sandbox..." -ForegroundColor Yellow
+Write-Host "`nCleaning up old sandbox instances..." -ForegroundColor Yellow
 
-# 4. Launch Sandbox
+# 4. Kill existing sandbox processes
+$existing = Get-Process -Name "WindowsSandbox" -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host "  Stopping $($existing.Count) running sandbox instance(s)..."
+    $existing | Stop-Process -Force
+    Start-Sleep -Seconds 2
+}
+
+# 5. Remove stale VHDX lock files if sandbox exited uncleanly
+$sandboxVmDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows Sandbox"
+if (Test-Path $sandboxVmDir) {
+    Get-ChildItem -Path $sandboxVmDir -Filter "*.vhdx.lock" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+# 6. Launch Sandbox
 $sandboxExe = "$env:SystemRoot\System32\WindowsSandbox.exe"
 if (-not (Test-Path $sandboxExe)) {
     Write-Error "Windows Sandbox not found at $sandboxExe."
