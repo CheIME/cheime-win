@@ -16,20 +16,20 @@ use std::sync::Mutex;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
-use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontW,
     CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE,
     FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE,
     RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
-    TextOutW,
+    TextOutW, ClientToScreen,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
     TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HMENU,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretPos, GWLP_USERDATA, GetWindowLongPtrW, HMENU,
     HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
     WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -296,21 +296,56 @@ unsafe extern "system" fn candidate_window_proc(
 // ── Message handlers ──────────────────────────────────────────────────
 
 /// Get the screen (left, bottom) of the composition text via a synchronous
-/// read-only edit session calling `ITfContextView::GetTextExt` (Fix 1).
+/// Get the screen position for the candidate window.
+/// Tries GetTextExt (TSF composition range), then GetCaretPos (system caret).
 fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
-    // Get composition range (lock dropped before requesting edit session).
+    // Try 1: TSF GetTextExt via edit session
+    if let Some(pos) = try_get_text_ext(ctx) {
+        tsf_log(&format!("[CheIME] GetTextExt OK: ({}, {})", pos.0, pos.1));
+        return Some(pos);
+    }
+
+    // Try 2: System caret position (works in most apps including Notepad)
+    let mut point = POINT::default();
+    if unsafe { GetCaretPos(&mut point) }.is_ok() {
+        // Convert client coordinates to screen coordinates
+        // We need the focused window handle
+        if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
+            if let Ok(context) = unsafe { doc.GetTop() } {
+                if let Ok(view) = unsafe { context.GetActiveView() } {
+                    let mut hwnd = HWND::default();
+                    if let Ok(hwnd) = unsafe { view.GetWnd() } && !hwnd.is_invalid() {
+                        let mut screen_point = point;
+                        unsafe { ClientToScreen(hwnd, &mut screen_point) };
+                        tsf_log(&format!(
+                            "[CheIME] CaretPos fallback: client=({}, {}) screen=({}, {})",
+                            point.x, point.y, screen_point.x, screen_point.y
+                        ));
+                        return Some((screen_point.x, screen_point.y));
+                    }
+                }
+            }
+        }
+        tsf_log(&format!("[CheIME] CaretPos client: ({}, {})", point.x, point.y));
+        return Some((point.x, point.y));
+    }
+
+    tsf_log("[CheIME] All cursor position methods failed");
+    None
+}
+
+/// Try GetTextExt via TSF edit session.
+fn try_get_text_ext(ctx: &WindowContext) -> Option<(i32, i32)> {
     let range = {
         let comp_guard = ctx.composition.lock().ok()?;
         let comp = comp_guard.as_ref()?;
         unsafe { comp.GetRange() }.ok()?
     };
 
-    // Get the active context view.
     let doc = unsafe { ctx.thread_mgr.GetFocus() }.ok()?;
     let context = unsafe { doc.GetTop() }.ok()?;
     let view = unsafe { context.GetActiveView() }.ok()?;
 
-    // Create a synchronous read-only edit session to call GetTextExt.
     let result = Cell::new(None::<RECT>);
     let session = TextExtentSession::new(view, range, &result as *const Cell<Option<RECT>>);
     let raw = Box::into_raw(session);
@@ -321,12 +356,9 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
         let _ = unsafe { context.RequestEditSession(ctx.client_id, session_ref, flags) };
     }
 
-    // Synchronous edit session has finished; safe to release.
     unsafe { TextExtentSession::release(raw_void) };
 
-    let rect = result.take();
-    tsf_log(&format!("[CheIME] GetTextExt result: {rect:?}"));
-    rect.map(|r| (r.left, r.bottom))
+    result.take().map(|r| (r.left, r.bottom))
 }
 
 fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
