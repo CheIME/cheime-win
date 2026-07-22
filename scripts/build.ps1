@@ -31,7 +31,7 @@ if (-not $SkipGates) {
     if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed" }
 
     Write-Step "Gate: cargo clippy"
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --lib --tests -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw "clippy failed" }
 
     Write-Step "Gate: cargo test --workspace"

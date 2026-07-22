@@ -31,7 +31,7 @@ use windows::Win32::UI::TextServices::{
     TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCaretPos, GetWindowLongPtrW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
     HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY,
     WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE,
