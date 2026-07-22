@@ -108,8 +108,14 @@ fn chinese_mode_keys(
             }
         }
 
-        // Enter: handled
-        0x0D => KeyAdmission::Handled,
+        // Enter: commit raw composition text. When no composition, pass-through.
+        0x0D => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // Escape: handled
         0x1B => KeyAdmission::Handled,
@@ -289,16 +295,14 @@ mod tests {
             check_key(InputMode::Chinese, true, VK_BACK, false, false, false, true),
             KeyAdmission::Handled
         );
+        // Enter passes through when no composition
         assert_eq!(
-            check_key(
-                InputMode::Chinese,
-                true,
-                VK_RETURN,
-                false,
-                false,
-                false,
-                false
-            ),
+            check_key(InputMode::Chinese, true, VK_RETURN, false, false, false, false),
+            KeyAdmission::PassThrough
+        );
+        // Enter is handled when composition exists
+        assert_eq!(
+            check_key(InputMode::Chinese, true, VK_RETURN, false, false, false, true),
             KeyAdmission::Handled
         );
         assert_eq!(
