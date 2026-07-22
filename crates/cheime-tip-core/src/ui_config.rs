@@ -404,7 +404,6 @@ fn resolve_extends(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn default_roundtrip() {

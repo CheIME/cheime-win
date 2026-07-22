@@ -31,11 +31,11 @@ use windows::Win32::UI::TextServices::{
     TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HMENU,
+    HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -325,7 +325,7 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
                     x: rc.left,
                     y: rc.bottom,
                 };
-                unsafe { ClientToScreen(hwnd, &mut screen_point) };
+                unsafe { let _ = ClientToScreen(hwnd, &mut screen_point); };
                 tsf_log(&format!(
                     "[CheIME] GetGUIThreadInfo: caret=({}, {}) screen=({}, {})",
                     rc.left, rc.bottom, screen_point.x, screen_point.y
