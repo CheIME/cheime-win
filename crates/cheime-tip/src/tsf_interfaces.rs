@@ -579,7 +579,7 @@ unsafe extern "system" fn test_key(
     let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
     let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
-    let ctrl_space = key_code == 0x20 && !is_alt && !is_shift;
+    let ctrl_space = key_code == 0x20 && is_ctrl && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
@@ -621,7 +621,7 @@ unsafe extern "system" fn key_down(
     let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
     let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
-    let ctrl_space = key_code == 0x20 && !is_alt && !is_shift;
+    let ctrl_space = key_code == 0x20 && is_ctrl && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
