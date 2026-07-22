@@ -26,8 +26,8 @@ use thiserror::Error;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES,
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::core::PCWSTR;
 
@@ -91,7 +91,7 @@ fn run_server_until(
             CreateNamedPipeW(
                 PCWSTR::from_raw(pipe_name_wide.as_ptr()),
                 PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES,
                 65536,
                 65536,
@@ -164,9 +164,9 @@ fn handle_client(
     }
 
     let read_pipe = unsafe { PipeHandle::from_raw_handle(pipe_handle) };
+    let write_pipe = unsafe { PipeHandle::from_raw_handle(dup_handle) };
     read_pipe.set_blocking(false)
         .map_err(|error| ServerError::Io(error.to_string()))?;
-    let write_pipe = unsafe { PipeHandle::from_raw_handle(dup_handle) };
     let codec = MessageCodec::new(MessageCodec::DEFAULT_MAX);
     let mut reader = PipeReader::new(read_pipe);
     let mut writer = PipeWriter::new(write_pipe);

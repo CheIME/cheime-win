@@ -152,6 +152,40 @@ impl<R: Read + Send> PipeReader<R> {
         }
     }
 
+    /// Read one complete frame and return the raw payload bytes, preserving
+    /// partial bytes when the deadline expires.  Useful when the caller needs
+    /// to try decoding as multiple message types.
+    pub fn read_raw_frame_until(
+        &mut self,
+        codec: &MessageCodec,
+        deadline: std::time::Instant,
+    ) -> Result<Option<Vec<u8>>, PipeError> {
+        loop {
+            if let Some(payload) = decode_raw_buffered(&mut self.buffer, codec)? {
+                return Ok(Some(payload));
+            }
+
+            let mut chunk = [0u8; 4096];
+            match self.inner.read(&mut chunk) {
+                Ok(0) => return eof_raw_result(&self.buffer),
+                Ok(count) => self.buffer.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        return Err(PipeError::TimedOut);
+                    }
+                    std::thread::sleep(
+                        deadline
+                            .saturating_duration_since(now)
+                            .min(std::time::Duration::from_millis(1)),
+                    );
+                }
+                Err(error) => return Err(PipeError::Io(error.to_string())),
+            }
+        }
+    }
+
     pub fn get_ref(&self) -> &R {
         &self.inner
     }
@@ -175,6 +209,38 @@ fn decode_buffered<M: DeserializeOwned>(
 }
 
 fn eof_result<M>(buffer: &[u8]) -> Result<Option<M>, PipeError> {
+    match buffer.len() {
+        0 => Ok(None),
+        available @ 1..=3 => Err(PipeError::TruncatedHeader { available }),
+        available => {
+            let expected =
+                u32::from_le_bytes(buffer[..4].try_into().expect("four-byte header")) as usize;
+            Err(PipeError::TruncatedPayload {
+                expected,
+                available: available - 4,
+            })
+        }
+    }
+}
+
+fn decode_raw_buffered(
+    buffer: &mut Vec<u8>,
+    codec: &MessageCodec,
+) -> Result<Option<Vec<u8>>, PipeError> {
+    if buffer.len() < 4 {
+        return Ok(None);
+    }
+    let header: [u8; 4] = buffer[..4].try_into().expect("four-byte header");
+    let payload_len = validate_length(header, codec)?;
+    if buffer.len() < 4 + payload_len {
+        return Ok(None);
+    }
+    let payload = buffer[4..4 + payload_len].to_vec();
+    buffer.drain(..4 + payload_len);
+    Ok(Some(payload))
+}
+
+fn eof_raw_result(buffer: &[u8]) -> Result<Option<Vec<u8>>, PipeError> {
     match buffer.len() {
         0 => Ok(None),
         available @ 1..=3 => Err(PipeError::TruncatedHeader { available }),

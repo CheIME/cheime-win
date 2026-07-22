@@ -7,7 +7,7 @@ use crate::tsf_interfaces::tsf_log;
 use cheime_model::{CandidateSnapshot, PlatformAction};
 use cheime_protocol::{EngineMessage, FrontendMessage};
 use cheime_tip_core::{PipeError, PipeReader, PipeWriter};
-use cheime_wire::{ClientHello, HelloAck, MessageCodec, ServerHello};
+use cheime_wire::{ClientHello, HelloAck, HelloRejected, MessageCodec, ServerHello};
 #[cfg(test)]
 use serde::Deserialize;
 use std::os::windows::io::AsRawHandle;
@@ -247,10 +247,20 @@ fn run_client_handshake(
         .write_message(codec, &client_hello)
         .map_err(|e| format!("write ClientHello: {e}"))?;
 
-    let ack: HelloAck = reader
-        .read_message_until(codec, deadline)
-        .map_err(|e| format!("read HelloAck: {e}"))?
-        .ok_or("no HelloAck")?;
+    // Read raw frame — could be HelloAck or HelloRejected
+    let ack_payload = reader
+        .read_raw_frame_until(codec, deadline)
+        .map_err(|e| format!("read handshake response: {e}"))?
+        .ok_or("no handshake response")?;
+    let ack: HelloAck = match codec.decode_handshake(&ack_payload) {
+        Ok(ack) => ack,
+        Err(_) => {
+            let rejected: HelloRejected = codec
+                .decode_handshake(&ack_payload)
+                .map_err(|e| format!("decode handshake response: {e}"))?;
+            return Err(format!("handshake rejected: {}", rejected.reason));
+        }
+    };
     let state = validate_handshake(&server_hello, client_id, &ack)?;
     Ok((reader, writer, FrontendSession::new(state)))
 }
@@ -391,37 +401,52 @@ fn duplicate_handle(
 
 fn post_snapshot(hwnd: HWND, snapshot: &CandidateSnapshot) {
     let b = Box::new(snapshot.clone());
+    let ptr = Box::into_raw(b) as isize;
     unsafe {
-        let _ = PostMessageW(
+        if PostMessageW(
             hwnd,
             WM_CHEIME_SNAPSHOT,
             windows::Win32::Foundation::WPARAM(0),
-            windows::Win32::Foundation::LPARAM(Box::into_raw(b) as isize),
-        );
+            windows::Win32::Foundation::LPARAM(ptr),
+        )
+        .is_err()
+        {
+            drop(Box::from_raw(ptr as *mut CandidateSnapshot));
+        }
     }
 }
 
 fn post_action(hwnd: HWND, action: &PlatformAction) {
     let b = Box::new(action.clone());
+    let ptr = Box::into_raw(b) as isize;
     unsafe {
-        let _ = PostMessageW(
+        if PostMessageW(
             hwnd,
             WM_CHEIME_ACTION,
             windows::Win32::Foundation::WPARAM(0),
-            windows::Win32::Foundation::LPARAM(Box::into_raw(b) as isize),
-        );
+            windows::Win32::Foundation::LPARAM(ptr),
+        )
+        .is_err()
+        {
+            drop(Box::from_raw(ptr as *mut PlatformAction));
+        }
     }
 }
 
 fn post_status(hwnd: HWND, connected: bool, detail: &str) {
     let b = Box::new((connected, detail.to_owned()));
+    let ptr = Box::into_raw(b) as isize;
     unsafe {
-        let _ = PostMessageW(
+        if PostMessageW(
             hwnd,
             WM_CHEIME_STATUS,
             windows::Win32::Foundation::WPARAM(connected as usize),
-            windows::Win32::Foundation::LPARAM(Box::into_raw(b) as isize),
-        );
+            windows::Win32::Foundation::LPARAM(ptr),
+        )
+        .is_err()
+        {
+            drop(Box::from_raw(ptr as *mut (bool, String)));
+        }
     }
 }
 

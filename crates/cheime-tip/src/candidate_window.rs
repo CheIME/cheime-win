@@ -9,28 +9,43 @@ use crate::tsf_interfaces::{ComTip, tsf_log};
 use cheime_model::{CandidateSnapshot, PlatformAction, PlatformActionKind};
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::layout::{hit_test_candidate, layout_snapshot};
-use windows::Win32::Graphics::Gdi::RedrawWindow;
-use windows::Win32::Graphics::Gdi::{RDW_INVALIDATE, RDW_ERASE};
 use cheime_tip_core::ui_config::UiConfig;
+use std::cell::Cell;
+use std::ffi::c_void;
 use std::sync::Mutex;
+use std::sync::Once;
+use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject,
-    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, OPAQUE, OUT_DEFAULT_PRECIS, SelectObject,
-    SetBkColor, SetBkMode, SetTextColor, TextOutW, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
-    COLOR_WINDOW, COLOR_WINDOWTEXT, HBRUSH, HDC, PAINTSTRUCT, TRANSPARENT,
+    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, OPAQUE,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject,
+    SetBkColor, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
+    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
 };
-use windows::Win32::UI::TextServices::{ITfComposition, ITfThreadMgr};
+use windows::Win32::UI::TextServices::{
+    ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl,
+    ITfRange, ITfThreadMgr, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, GWLP_USERDATA,
-    RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
     WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
     WNDCLASSW, WNDCLASS_STYLES, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, HMENU,
 };
+use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
 const CANDIDATE_WINDOW_CLASS: &str = "CheIME_CandidateWindow";
+
+// ── COM constants (local copies to avoid coupling) ────────────────────
+const S_OK: HRESULT = HRESULT(0);
+const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
+const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
+
+/// One-time guard for `RegisterClassW` (Fix 4: prevents GDI brush leak).
+static REGISTER_WNDCLASS: Once = Once::new();
 
 pub type SnapshotBox = Mutex<Option<(CandidateSnapshot, Vec<RowRender>)>>;
 
@@ -51,11 +66,37 @@ pub struct WindowContext {
     pub tip: *mut ComTip,
     /// UI configuration (never modified after window creation; safe shared ref).
     pub config: UiConfig,
+    /// Cached GDI font handle; created once, freed on drop (Fix 3).
+    pub cached_font: HFONT,
+}
+
+impl Drop for WindowContext {
+    fn drop(&mut self) {
+        if !self.cached_font.is_invalid() {
+            unsafe { let _ = DeleteObject(self.cached_font); }
+        }
+    }
 }
 
 pub struct CandidateWindow {
     hwnd: HWND,
     pub ctx_ptr: *const WindowContext,
+}
+
+/// Create a GDI font for the given pixel size (Microsoft YaHei, normal weight).
+fn create_gdi_font(font_size: i32) -> HFONT {
+    let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+    unsafe {
+        CreateFontW(
+            font_size, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            0,
+            DEFAULT_QUALITY.0 as u32,
+            FF_DONTCARE.0 as u32 | DEFAULT_CHARSET.0 as u32,
+            windows::core::PCWSTR::from_raw(face.as_ptr()),
+        )
+    }
 }
 
 impl CandidateWindow {
@@ -68,21 +109,24 @@ impl CandidateWindow {
             .chain(std::iter::once(0))
             .collect();
 
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(candidate_window_proc),
-            hInstance: HINSTANCE(hinst.0),
-            lpszClassName: windows::core::PCWSTR::from_raw(class_wide.as_ptr()),
-            style: WNDCLASS_STYLES(0),
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hIcon: Default::default(),
-            hCursor: Default::default(),
-            hbrBackground: HBRUSH(
-                unsafe { CreateSolidBrush(COLORREF(GetSysColor(COLOR_WINDOW))) }.0,
-            ),
-            lpszMenuName: windows::core::PCWSTR::null(),
-        };
-        unsafe { RegisterClassW(&wc) };
+        // Fix 4: Register class only once to avoid GDI brush leak.
+        REGISTER_WNDCLASS.call_once(|| {
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(candidate_window_proc),
+                hInstance: HINSTANCE(hinst.0),
+                lpszClassName: windows::core::PCWSTR::from_raw(class_wide.as_ptr()),
+                style: WNDCLASS_STYLES(0),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hIcon: Default::default(),
+                hCursor: Default::default(),
+                hbrBackground: HBRUSH(
+                    unsafe { CreateSolidBrush(COLORREF(GetSysColor(COLOR_WINDOW))) }.0,
+                ),
+                lpszMenuName: windows::core::PCWSTR::null(),
+            };
+            unsafe { RegisterClassW(&wc) };
+        });
 
         let hwnd = unsafe {
             CreateWindowExW(
@@ -127,6 +171,8 @@ impl CandidateWindow {
         channel: SyncSender<FrontendMessage>,
         tip: *mut ComTip,
     ) -> Box<WindowContext> {
+        let config = UiConfig::default();
+        let cached_font = create_gdi_font(config.candidate.font_size);
         Box::new(WindowContext {
             snapshot: Mutex::new(None),
             thread_mgr,
@@ -134,7 +180,8 @@ impl CandidateWindow {
             channel,
             composition: Mutex::new(None),
             tip,
-            config: UiConfig::default(),
+            cached_font,
+            config,
         })
     }
 }
@@ -178,7 +225,8 @@ unsafe extern "system" fn candidate_window_proc(
                 if let Some(ctx) = ctx() {
                     if let Ok(st) = ctx.snapshot.lock() {
                         if let Some((_, rows)) = st.as_ref() {
-                            unsafe { paint(hdc, rows, &ctx.config); }
+                            // Fix 3: use cached font instead of creating one per paint.
+                            unsafe { paint(hdc, rows, &ctx.config, ctx.cached_font); }
                         }
                     }
                 }
@@ -228,6 +276,38 @@ unsafe extern "system" fn candidate_window_proc(
 
 // ── Message handlers ──────────────────────────────────────────────────
 
+/// Get the screen (left, bottom) of the composition text via a synchronous
+/// read-only edit session calling `ITfContextView::GetTextExt` (Fix 1).
+fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
+    // Get composition range (lock dropped before requesting edit session).
+    let range = {
+        let comp_guard = ctx.composition.lock().ok()?;
+        let comp = comp_guard.as_ref()?;
+        unsafe { comp.GetRange() }.ok()?
+    };
+
+    // Get the active context view.
+    let doc = unsafe { ctx.thread_mgr.GetFocus() }.ok()?;
+    let context = unsafe { doc.GetTop() }.ok()?;
+    let view = unsafe { context.GetActiveView() }.ok()?;
+
+    // Create a synchronous read-only edit session to call GetTextExt.
+    let result = Cell::new(None::<RECT>);
+    let session = TextExtentSession::new(view, range, &result as *const Cell<Option<RECT>>);
+    let raw = Box::into_raw(session);
+    let raw_void: *mut c_void = raw.cast();
+
+    if let Some(session_ref) = unsafe { ITfEditSession::from_raw_borrowed(&raw_void) } {
+        let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0);
+        let _ = unsafe { context.RequestEditSession(ctx.client_id, session_ref, flags) };
+    }
+
+    // Synchronous edit session has finished; safe to release.
+    unsafe { TextExtentSession::release(raw_void) };
+
+    result.take().map(|r| (r.left, r.bottom))
+}
+
 fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     let cfg = &ctx.config;
@@ -258,8 +338,13 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             *st = Some((*boxed, rows));
         }
 
-        let x = cfg.window.caret_offset_x;
-        let y = cfg.window.caret_offset_y;
+        // Fix 1: Position window below composition text via GetTextExt.
+        let (x, y) = get_composition_screen_rect(ctx)
+            .map(|(left, bottom)| {
+                (left + cfg.window.caret_offset_x, bottom + cfg.window.caret_offset_y)
+            })
+            .unwrap_or((cfg.window.caret_offset_x, cfg.window.caret_offset_y));
+
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
@@ -303,6 +388,7 @@ fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     LRESULT(0)
 }
 
+// Fix 2: Single lock scope — eliminates TOCTOU race between hit_test and candidate lookup.
 fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     let cfg = &ctx.config;
@@ -311,20 +397,12 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let char_width = cfg.candidate.char_width.unwrap_or(cfg.candidate.font_size);
     let line_height = cfg.candidate.line_height;
 
-    let hit_index = match ctx.snapshot.lock() {
-        Ok(guard) => {
-            if let Some((snap, _rows)) = guard.as_ref() {
-                hit_test_candidate(&layout_snapshot(snap, line_height, char_width), x, y, line_height)
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    };
-
-    if let Some(idx) = hit_index {
-        if let Ok(guard) = ctx.snapshot.lock() {
-            if let Some((snap, _rows)) = guard.as_ref() {
+    if let Ok(guard) = ctx.snapshot.lock() {
+        if let Some((snap, _rows)) = guard.as_ref() {
+            let hit_index = hit_test_candidate(
+                &layout_snapshot(snap, line_height, char_width), x, y, line_height,
+            );
+            if let Some(idx) = hit_index {
                 let candidate = snap.candidates.get(idx.saturating_sub(1));
                 if let Some(cand) = candidate {
                     let action = PlatformAction {
@@ -352,7 +430,8 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
 
 // ── Rendering ─────────────────────────────────────────────────────────
 
-unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig) {
+// Fix 3: accept cached font handle; no longer creates a font per paint call.
+unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
     let fg = parse_hex(&config.theme.colors.candidate_text)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
     let hl_bg = parse_hex(&config.theme.colors.selected_background)
@@ -360,20 +439,6 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig) {
     let hl_fg = parse_hex(&config.theme.colors.selected_text)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHTTEXT) }));
 
-    let font_size = config.candidate.font_size;
-    let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
-
-    let font = unsafe {
-        CreateFontW(
-            font_size, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32,
-            0,
-            DEFAULT_QUALITY.0 as u32,
-            FF_DONTCARE.0 as u32 | DEFAULT_CHARSET.0 as u32,
-            windows::core::PCWSTR::from_raw(face.as_ptr()),
-        )
-    };
     let old = unsafe { SelectObject(hdc, font) };
 
     let pad_x = config.candidate.row_padding_x;
@@ -393,7 +458,7 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig) {
     if !old.is_invalid() {
         unsafe { SelectObject(hdc, old); }
     }
-    unsafe { let _ = DeleteObject(font); }
+    // Do NOT delete the font — it is cached in WindowContext.
 }
 
 fn build_rows(
@@ -420,7 +485,7 @@ fn build_rows(
         use std::fmt::Write;
         if let Some(idx) = row.index {
             let _ = write!(s, "{}. {}", idx, row.text);
-            if let Some(ref ann) = row.annotation {
+            if let Some(ann) = &row.annotation {
                 let _ = write!(s, " {}", ann);
             }
         } else {
@@ -457,6 +522,108 @@ fn parse_hex(s: &str) -> Option<COLORREF> {
     };
     Some(COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16)))
 }
+
+// ── TextExtent edit session (for GetTextExt) ──────────────────────────
+
+/// Lightweight COM callback that calls `ITfContextView::GetTextExt` inside a
+/// synchronous edit session and stores the result in a `Cell`.
+#[repr(C)]
+struct TextExtentSession {
+    vtbl: &'static ITfEditSession_Vtbl,
+    ref_count: AtomicU32,
+    view: ITfContextView,
+    range: ITfRange,
+    result: *const Cell<Option<RECT>>,
+}
+
+impl TextExtentSession {
+    fn new(view: ITfContextView, range: ITfRange, result: *const Cell<Option<RECT>>) -> Box<Self> {
+        Box::new(Self {
+            vtbl: &TEXT_EXTENT_VTBL,
+            ref_count: AtomicU32::new(1),
+            view,
+            range,
+            result,
+        })
+    }
+
+    unsafe fn from_raw(this: *mut c_void) -> *mut Self { this.cast() }
+
+    unsafe fn add_ref(this: *mut c_void) -> u32 {
+        let cb = unsafe { &*Self::from_raw(this) };
+        cb.ref_count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    unsafe fn release(this: *mut c_void) -> u32 {
+        let cb = unsafe { &mut *Self::from_raw(this) };
+        let prev = cb.ref_count.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            fence(Ordering::Acquire);
+            unsafe { drop(Box::from_raw(Self::from_raw(this))) };
+            0
+        } else {
+            prev - 1
+        }
+    }
+
+    unsafe fn query_interface(
+        this: *mut c_void,
+        iid: *const windows::core::GUID,
+        out: *mut *mut c_void,
+    ) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        unsafe { *out = std::ptr::null_mut() };
+        if this.is_null() || iid.is_null() {
+            return E_POINTER;
+        }
+        let guid = unsafe { *iid };
+        if guid == IUnknown::IID || guid == ITfEditSession::IID {
+            unsafe { Self::add_ref(this) };
+            unsafe { *out = this };
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    }
+}
+
+unsafe extern "system" fn tes_query_interface(
+    this: *mut c_void,
+    iid: *const windows::core::GUID,
+    out: *mut *mut c_void,
+) -> HRESULT {
+    unsafe { TextExtentSession::query_interface(this, iid, out) }
+}
+
+unsafe extern "system" fn tes_add_ref(this: *mut c_void) -> u32 {
+    unsafe { TextExtentSession::add_ref(this) }
+}
+
+unsafe extern "system" fn tes_release(this: *mut c_void) -> u32 {
+    unsafe { TextExtentSession::release(this) }
+}
+
+unsafe extern "system" fn tes_do_edit_session(this: *mut c_void, ec: u32) -> HRESULT {
+    let session = unsafe { &*(this as *const TextExtentSession) };
+    let mut rect = RECT::default();
+    let mut clipped = BOOL(0);
+    let hr = unsafe { session.view.GetTextExt(ec, &session.range, &mut rect, &mut clipped) };
+    if hr.is_ok() {
+        unsafe { (*session.result).set(Some(rect)) };
+    }
+    S_OK
+}
+
+static TEXT_EXTENT_VTBL: ITfEditSession_Vtbl = ITfEditSession_Vtbl {
+    base__: IUnknown_Vtbl {
+        QueryInterface: tes_query_interface,
+        AddRef: tes_add_ref,
+        Release: tes_release,
+    },
+    DoEditSession: tes_do_edit_session,
+};
 
 #[cfg(test)]
 mod tests {

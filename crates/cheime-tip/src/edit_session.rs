@@ -384,18 +384,31 @@ fn commit_at_selection(ec: u32, context: &ITfContext, text: &str) -> Result<(), 
     if unsafe { context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched) }
         .is_err()
     {
+        release_selection_range(selection);
         return Err("GetSelection failed".into());
     }
     if fetched == 0 {
+        release_selection_range(selection);
         return Err("GetSelection fetched 0".into());
     }
     let sel_range = match selection[0].range.as_ref() {
         Some(r) => r,
-        None => return Err("GetSelection returned None range".into()),
+        None => {
+            release_selection_range(selection);
+            return Err("GetSelection returned None range".into());
+        }
     };
     let text_wide: Vec<u16> = text.encode_utf16().collect();
-    unsafe { sel_range.SetText(ec, 0, &text_wide) }.map_err(|e| format!("SetText: {e}"))?;
-    unsafe { sel_range.Collapse(ec, TF_ANCHOR_END) }.map_err(|e| format!("Collapse: {e}"))?;
+    let set_result = unsafe { sel_range.SetText(ec, 0, &text_wide) };
+    if let Err(e) = set_result {
+        release_selection_range(selection);
+        return Err(format!("SetText: {e}"));
+    }
+    let collapse_result = unsafe { sel_range.Collapse(ec, TF_ANCHOR_END) };
+    if let Err(e) = collapse_result {
+        release_selection_range(selection);
+        return Err(format!("Collapse: {e}"));
+    }
     release_selection_range(selection);
     Ok(())
 }

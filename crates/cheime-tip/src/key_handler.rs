@@ -134,9 +134,14 @@ fn chinese_mode_keys(
             }
         }
 
-        // + and -: page up/down
-        0xBB | 0x6B => KeyAdmission::Handled, // =/+
-        0xBD | 0x6D => KeyAdmission::Handled, // -/_
+        // + and -: page up/down when composition is active, otherwise pass through
+        0xBB | 0x6B | 0xBD | 0x6D => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // PageUp/PageDown: handled
         0x21 | 0x22 => KeyAdmission::Handled,

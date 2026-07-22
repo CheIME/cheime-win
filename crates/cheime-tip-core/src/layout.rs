@@ -7,10 +7,19 @@
 use cheime_model::CandidateSnapshot;
 
 /// Spacing constants (in pixels).
-pub const ROW_PADDING_X: i32 = 8;
+pub const ROW_PADDING_X: i32 = 10;
 pub const ROW_PADDING_Y: i32 = 2;
-pub const INDEX_WIDTH: i32 = 24;
+pub const INDEX_WIDTH: i32 = 28;
 pub const INDEX_PADDING: i32 = 4;
+
+/// Compute the display width of a string in "columns".
+///
+/// ASCII characters count as 1 column; non-ASCII (e.g. CJK) as 2.
+fn display_width(text: &str) -> i32 {
+    text.chars()
+        .map(|c| if c.is_ascii() { 1 } else { 2 })
+        .sum()
+}
 
 /// Describes how to render one row of the candidate window.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,14 +61,14 @@ pub fn compute_window_size(
 
     let mut max_text_width = 0i32;
     if !snapshot.preedit.is_empty() {
-        max_text_width = max_text_width.max(snapshot.preedit.len() as i32 * char_width);
+        max_text_width = max_text_width.max(display_width(&snapshot.preedit) * char_width);
     }
     for cand in &snapshot.candidates {
-        let text_w = cand.text.len() as i32 * char_width;
+        let text_w = display_width(&cand.text) * char_width;
         let ann_w = cand
             .annotation
             .as_ref()
-            .map(|a| a.len() as i32 * char_width)
+            .map(|a| display_width(a) * char_width)
             .unwrap_or(0);
         max_text_width = max_text_width.max(INDEX_WIDTH + INDEX_PADDING + text_w + ann_w);
     }
