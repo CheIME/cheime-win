@@ -337,6 +337,26 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
         }
     }
 
+    // Try 3: ITfContextView::GetScreenExt — returns the entire document area.
+    // Less precise than GetTextExt but works in more applications (e.g. Explorer).
+    if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
+        if let Ok(context) = unsafe { doc.GetTop() } {
+            if let Ok(view) = unsafe { context.GetActiveView() } {
+                let rc = unsafe { view.GetScreenExt() };
+                if let Ok(rc) = rc {
+                    if rc.left != 0 || rc.top != 0 || rc.right != 0 || rc.bottom != 0 {
+                        tsf_log(&format!(
+                            "[CheIME] GetScreenExt: left={} top={} right={} bottom={}",
+                            rc.left, rc.top, rc.right, rc.bottom
+                        ));
+                        // Position at bottom-left of the document area
+                        return Some((rc.left, rc.bottom));
+                    }
+                }
+            }
+        }
+    }
+
     tsf_log("[CheIME] All cursor position methods failed");
     None
 }

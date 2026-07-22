@@ -394,6 +394,8 @@ fn commit_at_selection(ec: u32, context: &ITfContext, text: &str) -> Result<(), 
         release_selection_range(selection);
         return Err(format!("Collapse: {e}"));
     }
+    // Update the context selection so the cursor moves to end of committed text.
+    let _ = unsafe { context.SetSelection(ec, &selection) };
     release_selection_range(selection);
     Ok(())
 }
