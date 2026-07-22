@@ -31,7 +31,7 @@ if (-not $SkipBuild) {
 
 # 2. Determine bundle path
 $stagingRoot = if (Test-Path "D:\tmp\ime_test") { "D:\tmp\ime_test_v4" } else { Join-Path $env:TEMP "cheime-stage" }
-$bundleDir = Join-Path $stagingRoot "cheime-bundle"
+$bundleDir = Get-ChildItem -Path $stagingRoot -Directory -Filter "cheime-bundle*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 if (-not (Test-Path $bundleDir)) {
     Write-Error "Bundle not found at $bundleDir. Run build.ps1 first."
     exit 1

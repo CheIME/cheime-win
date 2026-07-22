@@ -6,7 +6,7 @@
 use crate::edit_session::request_edit_session;
 use crate::io_thread::{WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
 use crate::tsf_interfaces::{ComTip, tsf_log};
-use cheime_model::{CandidateSnapshot, PlatformAction, PlatformActionKind};
+use cheime_model::{CandidateSnapshot, PlatformAction};
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::layout::{hit_test_candidate, layout_snapshot};
 use cheime_tip_core::ui_config::UiConfig;
@@ -532,26 +532,23 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
             if let Some(idx) = hit_index {
                 let candidate = snap.candidates.get(idx.saturating_sub(1));
                 if let Some(cand) = candidate {
-                    let action = PlatformAction {
-                        id: cheime_model::ActionId::new(0),
-                        epoch: snap.epoch,
-                        revision: snap.revision,
-                        kind: PlatformActionKind::Commit {
-                            text: cand.text.clone(),
+                    tsf_log(&format!("[CheIME] Click select: {}", cand.text));
+                    let _ = ctx.channel.try_send(FrontendMessage::UiCommand {
+                        header: cheime_protocol::MessageHeader {
+                            protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                            client: cheime_model::ClientInstanceId::new(1),
+                            session: cheime_model::SessionId::new(1),
+                            epoch: cheime_model::SessionEpoch::new(1),
+                            sequence: cheime_model::Sequence::new(0),
+                            revision: cheime_model::Revision::new(0),
+                            deployment: cheime_model::DeploymentGeneration::new(1),
                         },
-                    };
-                    tsf_log(&format!("[CheIME] Click commit: {}", cand.text));
-                    if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
-                        if let Ok(context) = unsafe { doc.GetTop() } {
-                            request_edit_session(
-                                ctx.client_id,
-                                &context,
-                                action,
-                                &ctx.channel as *const SyncSender<FrontendMessage>,
-                                &ctx.composition as *const Mutex<Option<ITfComposition>>,
-                            );
-                        }
-                    }
+                        command: cheime_model::UiCommand::SelectCandidate {
+                            epoch: snap.epoch,
+                            snapshot_revision: snap.revision,
+                            candidate_id: cand.id,
+                        },
+                    });
                 }
             }
         }

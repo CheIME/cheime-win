@@ -63,7 +63,7 @@ foreach ($name in $artifacts.Keys) {
 
 # Stage bundle
 Write-Step "Staging guest bundle"
-$bundleDir = Join-Path $StagingRoot "cheime-bundle"
+$bundleDir = Join-Path $StagingRoot "cheime-bundle-$([guid]::NewGuid().ToString('N').Substring(0,8))"
 $binDir    = Join-Path $bundleDir "bin"
 $dataDir   = Join-Path $bundleDir "data\dicts"
 

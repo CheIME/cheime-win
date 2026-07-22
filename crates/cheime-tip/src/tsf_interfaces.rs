@@ -6,30 +6,27 @@
 //! pipe, or UI behavior is performed here.
 
 use crate::candidate_window::CandidateWindow;
-use crate::edit_session::request_edit_session;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
 use crate::key_handler::{InputMode, KeyAdmission, check_key};
 use crate::runtime::{
     ActivationResources, ApartmentState, FocusResources, rollback_before_drop, run_before_drop,
 };
-use cheime_model::{Key, KeyEvent, KeyState, PlatformAction, PlatformActionKind};
+use cheime_model::{Key, KeyEvent, KeyState};
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::TipChannel;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::null_mut;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
-use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext,
-    ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink,
-    ITfKeyEventSink_Vtbl, ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor,
-    ITfTextInputProcessor_Vtbl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl,
-    ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
+    ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext, ITfDisplayAttributeProvider,
+    ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Vtbl,
+    ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor, ITfTextInputProcessor_Vtbl,
+    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl, ITfThreadMgr, ITfThreadMgrEventSink,
+    ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
 };
 use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -670,29 +667,26 @@ unsafe extern "system" fn key_down(
             if let Ok(st) = ctx.snapshot.lock() {
                 if let Some((snap, _)) = st.as_ref() {
                     if let Some(cand) = snap.candidates.get(candidate_offset) {
-                        let action = PlatformAction {
-                            id: cheime_model::ActionId::new(0),
-                            epoch: snap.epoch,
-                            revision: snap.revision,
-                            kind: PlatformActionKind::Commit {
-                                text: cand.text.clone(),
-                            },
-                        };
                         tsf_log(&format!(
-                            "[CheIME] Digit{} commit (offset={}): {:?}",
-                            digit_idx, candidate_offset, action.kind
+                            "[CheIME] Digit{} select (offset={}): {}",
+                            digit_idx, candidate_offset, cand.text
                         ));
-                        if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
-                            if let Ok(context) = unsafe { doc.GetTop() } {
-                                request_edit_session(
-                                    ctx.client_id,
-                                    &context,
-                                    action,
-                                    &ctx.channel as *const SyncSender<FrontendMessage>,
-                                    &ctx.composition as *const Mutex<Option<ITfComposition>>,
-                                );
-                            }
-                        }
+                        let _ = ctx.channel.try_send(FrontendMessage::UiCommand {
+                            header: cheime_protocol::MessageHeader {
+                                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                                client: cheime_model::ClientInstanceId::new(1),
+                                session: cheime_model::SessionId::new(1),
+                                epoch: cheime_model::SessionEpoch::new(1),
+                                sequence: cheime_model::Sequence::new(0),
+                                revision: cheime_model::Revision::new(0),
+                                deployment: cheime_model::DeploymentGeneration::new(1),
+                            },
+                            command: cheime_model::UiCommand::SelectCandidate {
+                                epoch: snap.epoch,
+                                snapshot_revision: snap.revision,
+                                candidate_id: cand.id,
+                            },
+                        });
                         unsafe { *eaten = BOOL(1) };
                         return S_OK;
                     }
@@ -703,6 +697,53 @@ unsafe extern "system" fn key_down(
 
     match admission {
         KeyAdmission::Handled => {
+            // Intercept +/- keys for page up/down — send UiCommand, not KeyCommand.
+            // The engine processor doesn't handle these characters and would
+            // return UnsupportedCharacter, killing the session.
+            if (key_code == 0xBB || key_code == 0x6B) && unsafe { (*owner).has_composition.get() } {
+                // '+' / Numpad '+': next page
+                if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
+                    if let Some(ref channel) = *channel {
+                        tsf_log(&format!("[CheIME] NextPage vk={key_code:#04x}"));
+                        let _ = channel.try_send(FrontendMessage::UiCommand {
+                            header: cheime_protocol::MessageHeader {
+                                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                                client: cheime_model::ClientInstanceId::new(1),
+                                session: cheime_model::SessionId::new(1),
+                                epoch: cheime_model::SessionEpoch::new(1),
+                                sequence: cheime_model::Sequence::new(0),
+                                revision: cheime_model::Revision::new(0),
+                                deployment: cheime_model::DeploymentGeneration::new(1),
+                            },
+                            command: cheime_model::UiCommand::NextPage,
+                        });
+                    }
+                }
+                unsafe { *eaten = BOOL(1) };
+                return S_OK;
+            }
+            if (key_code == 0xBD || key_code == 0x6D) && unsafe { (*owner).has_composition.get() } {
+                // '-' / Numpad '-': previous page
+                if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
+                    if let Some(ref channel) = *channel {
+                        tsf_log(&format!("[CheIME] PreviousPage vk={key_code:#04x}"));
+                        let _ = channel.try_send(FrontendMessage::UiCommand {
+                            header: cheime_protocol::MessageHeader {
+                                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                                client: cheime_model::ClientInstanceId::new(1),
+                                session: cheime_model::SessionId::new(1),
+                                epoch: cheime_model::SessionEpoch::new(1),
+                                sequence: cheime_model::Sequence::new(0),
+                                revision: cheime_model::Revision::new(0),
+                                deployment: cheime_model::DeploymentGeneration::new(1),
+                            },
+                            command: cheime_model::UiCommand::PreviousPage,
+                        });
+                    }
+                }
+                unsafe { *eaten = BOOL(1) };
+                return S_OK;
+            }
             if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
                 if let Some(ref channel) = *channel {
                     let key = vk_to_key(key_code);
