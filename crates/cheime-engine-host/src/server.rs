@@ -11,17 +11,15 @@ use crate::pipe_handle::PipeHandle;
 use crate::session_runner;
 use cheime_config::schema::SchemaConfig;
 use cheime_dictionary::CompiledIndex;
-use cheime_model::{
-    ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId,
-};
+use cheime_model::{ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId};
 use cheime_pipeline::factory::PipelineFactory;
 use cheime_protocol::MessageHeader;
 use cheime_tip_core::{PipeReader, PipeWriter};
 use cheime_user_data::UserStore;
 use cheime_wire::{ClientHello, HelloAck, HelloRejected, MessageCodec, ServerHello, WireError};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
@@ -111,7 +109,9 @@ fn run_server_until(
             Ok(()) => true,
             Err(e) if e.code() == windows::Win32::Foundation::ERROR_PIPE_CONNECTED.into() => true,
             _ => {
-                unsafe { let _ = windows::Win32::Foundation::CloseHandle(handle); }
+                unsafe {
+                    let _ = windows::Win32::Foundation::CloseHandle(handle);
+                }
                 continue;
             }
         };
@@ -159,13 +159,16 @@ fn handle_client(
         )
     };
     if dup_ok.is_err() {
-        unsafe { let _ = windows::Win32::Foundation::CloseHandle(pipe_handle); }
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(pipe_handle);
+        }
         return Err(ServerError::Io("DuplicateHandle failed".into()));
     }
 
     let read_pipe = unsafe { PipeHandle::from_raw_handle(pipe_handle) };
     let write_pipe = unsafe { PipeHandle::from_raw_handle(dup_handle) };
-    read_pipe.set_blocking(false)
+    read_pipe
+        .set_blocking(false)
         .map_err(|error| ServerError::Io(error.to_string()))?;
     let codec = MessageCodec::new(MessageCodec::DEFAULT_MAX);
     let mut reader = PipeReader::new(read_pipe);
@@ -233,7 +236,8 @@ fn handle_client(
     let pipeline = PipelineFactory::build(config, Some(user_store), Some(index), None)
         .map_err(|e| ServerError::Pipe(format!("pipeline build failed: {e}")))?;
 
-    reader.get_ref()
+    reader
+        .get_ref()
         .set_blocking(true)
         .map_err(|error| ServerError::Io(error.to_string()))?;
 

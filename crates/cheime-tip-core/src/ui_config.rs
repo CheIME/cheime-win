@@ -56,9 +56,15 @@ pub enum Material {
     Transparent,
 }
 
-fn d1_0() -> f32 { 1.0 }
-fn d_pad() -> [i32; 2] { [8, 4] }
-fn d200() -> i32 { 200 }
+fn d1_0() -> f32 {
+    1.0
+}
+fn d_pad() -> [i32; 2] {
+    [8, 4]
+}
+fn d200() -> i32 {
+    200
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -85,12 +91,24 @@ pub struct CandidateConfig {
     pub label_size: i32,
 }
 
-fn d18() -> i32 { 18 }
-fn d22() -> i32 { 22 }
-fn d10() -> i32 { 10 }
-fn d2() -> i32 { 2 }
-fn d14() -> i32 { 14 }
-fn d10_usize() -> usize { 10 }
+fn d18() -> i32 {
+    18
+}
+fn d22() -> i32 {
+    22
+}
+fn d10() -> i32 {
+    10
+}
+fn d2() -> i32 {
+    2
+}
+fn d14() -> i32 {
+    14
+}
+fn d10_usize() -> usize {
+    10
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -102,7 +120,9 @@ pub struct ThemeConfig {
     pub use_system_accent: bool,
 }
 
-fn bool_true() -> bool { true }
+fn bool_true() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -129,36 +149,72 @@ pub struct Colors {
     pub comment_color: String,
 }
 
-fn bg() -> String { String::from("#ffffff") }
-fn fg() -> String { String::from("#000000") }
-fn cand() -> String { String::from("#333333") }
-fn sel_fg() -> String { String::from("#ffffff") }
-fn sel_bg() -> String { String::from("#0078d4") }
-fn comment() -> String { String::from("#888888") }
+fn bg() -> String {
+    String::from("#ffffff")
+}
+fn fg() -> String {
+    String::from("#000000")
+}
+fn cand() -> String {
+    String::from("#333333")
+}
+fn sel_fg() -> String {
+    String::from("#ffffff")
+}
+fn sel_bg() -> String {
+    String::from("#0078d4")
+}
+fn comment() -> String {
+    String::from("#888888")
+}
 
 impl Default for Colors {
     fn default() -> Self {
-        Self { background: bg(), foreground: fg(), candidate_text: cand(),
-               selected_text: sel_fg(), selected_background: sel_bg(),
-               label_color: cand(), comment_color: comment() }
+        Self {
+            background: bg(),
+            foreground: fg(),
+            candidate_text: cand(),
+            selected_text: sel_fg(),
+            selected_background: sel_bg(),
+            label_color: cand(),
+            comment_color: comment(),
+        }
     }
 }
 
 impl Default for ThemeConfig {
-    fn default() -> Self { Self { colors: Colors::default(), use_system_accent: true } }
+    fn default() -> Self {
+        Self {
+            colors: Colors::default(),
+            use_system_accent: true,
+        }
+    }
 }
 
 impl Default for CandidateConfig {
     fn default() -> Self {
-        Self { font_size: 18, char_width: None, line_height: 22,
-               row_padding_x: 10, row_padding_y: 2, page_size: 10, label_size: 14 }
+        Self {
+            font_size: 18,
+            char_width: None,
+            line_height: 22,
+            row_padding_x: 10,
+            row_padding_y: 2,
+            page_size: 10,
+            label_size: 14,
+        }
     }
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { material: Material::Opaque, opacity: 1.0, padding: [8, 4],
-               caret_offset_x: 0, caret_offset_y: 0, min_width: 200 }
+        Self {
+            material: Material::Opaque,
+            opacity: 1.0,
+            padding: [8, 4],
+            caret_offset_x: 0,
+            caret_offset_y: 0,
+            min_width: 200,
+        }
     }
 }
 
@@ -166,14 +222,22 @@ impl Default for WindowConfig {
 
 macro_rules! merge_field {
     ($parent:expr, $child:expr, $field:ident, $default:expr) => {
-        if $child.$field != ($default) { $child.$field } else { $parent.$field }
+        if $child.$field != ($default) {
+            $child.$field
+        } else {
+            $parent.$field
+        }
     };
 }
 
 impl UiConfig {
     pub fn merge(parent: &Self, child: &Self) -> Self {
         Self {
-            extends: if child.extends.is_empty() { parent.extends.clone() } else { child.extends.clone() },
+            extends: if child.extends.is_empty() {
+                parent.extends.clone()
+            } else {
+                child.extends.clone()
+            },
             window: WindowConfig::merge(&parent.window, &child.window),
             candidate: CandidateConfig::merge(&parent.candidate, &child.candidate),
             theme: ThemeConfig::merge(&parent.theme, &child.theme),
@@ -184,7 +248,11 @@ impl UiConfig {
 impl WindowConfig {
     fn merge(parent: &Self, child: &Self) -> Self {
         Self {
-            material: if child.material != Material::Opaque { child.material.clone() } else { parent.material.clone() },
+            material: if child.material != Material::Opaque {
+                child.material.clone()
+            } else {
+                parent.material.clone()
+            },
             opacity: merge_field!(parent, child, opacity, 1.0),
             padding: merge_field!(parent, child, padding, [8, 4]),
             caret_offset_x: merge_field!(parent, child, caret_offset_x, 0),
@@ -220,11 +288,23 @@ impl ThemeConfig {
 impl Colors {
     fn merge(parent: &Self, child: &Self) -> Self {
         Self {
-            background: if child.background != bg() { child.background.clone() } else { parent.background.clone() },
-            foreground: if child.foreground != fg() { child.foreground.clone() } else { parent.foreground.clone() },
+            background: if child.background != bg() {
+                child.background.clone()
+            } else {
+                parent.background.clone()
+            },
+            foreground: if child.foreground != fg() {
+                child.foreground.clone()
+            } else {
+                parent.foreground.clone()
+            },
             candidate_text: merge_color(&parent.candidate_text, &child.candidate_text, cand()),
             selected_text: merge_color(&parent.selected_text, &child.selected_text, sel_fg()),
-            selected_background: merge_color(&parent.selected_background, &child.selected_background, sel_bg()),
+            selected_background: merge_color(
+                &parent.selected_background,
+                &child.selected_background,
+                sel_bg(),
+            ),
             label_color: merge_color(&parent.label_color, &child.label_color, cand()),
             comment_color: merge_color(&parent.comment_color, &child.comment_color, comment()),
         }
@@ -232,7 +312,11 @@ impl Colors {
 }
 
 fn merge_color(parent: &str, child: &str, default: String) -> String {
-    if child != default { child.to_string() } else { parent.to_string() }
+    if child != default {
+        child.to_string()
+    } else {
+        parent.to_string()
+    }
 }
 
 // ── Capability declarations (DRAFT §8.6) ─────────────────────────────
@@ -260,39 +344,57 @@ impl Capabilities {
 
 pub fn load_ui_config(path: &std::path::Path) -> Result<UiConfig, String> {
     let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let mut config: UiConfig = serde_yaml::from_str(&raw)
-        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let mut config: UiConfig =
+        serde_yaml::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))?;
     let mut visited: Vec<String> = vec![];
     resolve_extends(&mut config, base_dir, &mut visited)
         .map_err(|e| format!("{}: {}", path.display(), e))?;
     Ok(config)
 }
 
-fn resolve_extends(config: &mut UiConfig, base_dir: &std::path::Path, visited: &mut Vec<String>) -> Result<(), String> {
-    if config.extends.is_empty() { return Ok(()); }
+fn resolve_extends(
+    config: &mut UiConfig,
+    base_dir: &std::path::Path,
+    visited: &mut Vec<String>,
+) -> Result<(), String> {
+    if config.extends.is_empty() {
+        return Ok(());
+    }
     let extends = std::mem::take(&mut config.extends);
     let mut merged_parent = UiConfig::default();
     let mut found_parent = false;
     for name in &extends {
         if visited.iter().any(|v| v == name) {
-            return Err(format!("circular extends: {} -> {}", visited.join(" -> "), name));
+            return Err(format!(
+                "circular extends: {} -> {}",
+                visited.join(" -> "),
+                name
+            ));
         }
         visited.push(name.clone());
         let parent_path = base_dir.join(format!("{}.yaml", name));
         if parent_path.exists() {
-            let raw = std::fs::read_to_string(&parent_path).map_err(|e| format!("read parent {}: {}", name, e))?;
-            let mut parent: UiConfig = serde_yaml::from_str(&raw).map_err(|e| format!("parse parent {}: {}", name, e))?;
+            let raw = std::fs::read_to_string(&parent_path)
+                .map_err(|e| format!("read parent {}: {}", name, e))?;
+            let mut parent: UiConfig =
+                serde_yaml::from_str(&raw).map_err(|e| format!("parse parent {}: {}", name, e))?;
             resolve_extends(&mut parent, base_dir, visited)?;
             merged_parent = UiConfig::merge(&merged_parent, &parent);
             found_parent = true;
         } else {
-            return Err(format!("extends '{}' not found at {}", name, parent_path.display()));
+            return Err(format!(
+                "extends '{}' not found at {}",
+                name,
+                parent_path.display()
+            ));
         }
         visited.pop();
     }
-    if found_parent { *config = UiConfig::merge(&merged_parent, config); }
+    if found_parent {
+        *config = UiConfig::merge(&merged_parent, config);
+    }
     config.extends = extends;
     Ok(())
 }
@@ -346,7 +448,10 @@ mod tests {
 
     #[test]
     fn capabilities_validate_material() {
-        let caps = Capabilities { materials: vec![Material::Opaque], animations: vec![] };
+        let caps = Capabilities {
+            materials: vec![Material::Opaque],
+            animations: vec![],
+        };
         assert!(caps.validate(&UiConfig::default()).is_ok());
         let mut cfg = UiConfig::default();
         cfg.window.material = Material::Mica;

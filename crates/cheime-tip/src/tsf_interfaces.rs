@@ -5,7 +5,7 @@
 //! One allocation owns every interface header. No TSF activation, edit-session,
 //! pipe, or UI behavior is performed here.
 
-use crate::candidate_window::{CandidateWindow};
+use crate::candidate_window::CandidateWindow;
 use crate::edit_session::request_edit_session;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
@@ -643,8 +643,16 @@ unsafe extern "system" fn key_down(
     // --- Digit key: commit candidate directly in TIP layer (before engine) ---
     let is_digit = (0x30..=0x39).contains(&key_code) || (0x60..=0x69).contains(&key_code);
     if is_digit && unsafe { (*owner).has_composition.get() } {
-        let digit_idx = if key_code >= 0x60 { key_code - 0x60 } else { key_code - 0x30 };
-        let candidate_offset = if digit_idx == 0 { 9 } else { (digit_idx as usize).saturating_sub(1) };
+        let digit_idx = if key_code >= 0x60 {
+            key_code - 0x60
+        } else {
+            key_code - 0x30
+        };
+        let candidate_offset = if digit_idx == 0 {
+            9
+        } else {
+            (digit_idx as usize).saturating_sub(1)
+        };
         let ctx_ref = {
             let cw = unsafe { (*owner).candidate_window.try_borrow() };
             match cw.as_ref().ok().and_then(|cw| cw.as_ref()) {
@@ -652,6 +660,11 @@ unsafe extern "system" fn key_down(
                 _ => std::ptr::null(),
             }
         };
+        tsf_log(&format!(
+            "[CheIME] Digit{}: ctx_ref null={}",
+            digit_idx,
+            ctx_ref.is_null()
+        ));
         if !ctx_ref.is_null() {
             let ctx = unsafe { &*ctx_ref };
             if let Ok(st) = ctx.snapshot.lock() {
@@ -661,14 +674,23 @@ unsafe extern "system" fn key_down(
                             id: cheime_model::ActionId::new(0),
                             epoch: snap.epoch,
                             revision: snap.revision,
-                            kind: PlatformActionKind::Commit { text: cand.text.clone() },
+                            kind: PlatformActionKind::Commit {
+                                text: cand.text.clone(),
+                            },
                         };
-                        tsf_log(&format!("[CheIME] Digit{} commit (offset={}): {:?}", digit_idx, candidate_offset, action.kind));
+                        tsf_log(&format!(
+                            "[CheIME] Digit{} commit (offset={}): {:?}",
+                            digit_idx, candidate_offset, action.kind
+                        ));
                         if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
                             if let Ok(context) = unsafe { doc.GetTop() } {
-                                request_edit_session(ctx.client_id, &context, action,
+                                request_edit_session(
+                                    ctx.client_id,
+                                    &context,
+                                    action,
                                     &ctx.channel as *const SyncSender<FrontendMessage>,
-                                    &ctx.composition as *const Mutex<Option<ITfComposition>>);
+                                    &ctx.composition as *const Mutex<Option<ITfComposition>>,
+                                );
                             }
                         }
                         unsafe { *eaten = BOOL(1) };
@@ -693,7 +715,10 @@ unsafe extern "system" fn key_down(
                         "[CheIME] OnKeyDown vk={key_code:#04x} key={key:?} mode={:?}",
                         unsafe { (*owner).mode.get() }
                     ));
-                    let _ = channel.try_send(FrontendMessage::KeyCommand {
+                    tsf_log(&format!(
+                        "[CheIME] KeyCommand sending vk={key_code:#04x} key={key:?}"
+                    ));
+                    let send_result = channel.try_send(FrontendMessage::KeyCommand {
                         header: cheime_protocol::MessageHeader {
                             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
                             client: cheime_model::ClientInstanceId::new(1),
@@ -705,6 +730,9 @@ unsafe extern "system" fn key_down(
                         },
                         event: KeyEvent { key, state },
                     });
+                    tsf_log(&format!(
+                        "[CheIME] KeyCommand sent vk={key_code:#04x} result={send_result:?}"
+                    ));
                 }
             }
             unsafe { *eaten = BOOL(1) };

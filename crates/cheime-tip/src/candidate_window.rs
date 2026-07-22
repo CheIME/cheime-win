@@ -18,22 +18,22 @@ use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject,
-    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, OPAQUE,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject,
-    SetBkColor, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
-    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontW,
+    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE,
+    FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE,
+    RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
+    TextOutW,
 };
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl,
-    ITfRange, ITfThreadMgr, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
+    ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
+    TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, GWLP_USERDATA,
-    HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
-    WNDCLASSW, WNDCLASS_STYLES, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HMENU,
+    HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -73,7 +73,9 @@ pub struct WindowContext {
 impl Drop for WindowContext {
     fn drop(&mut self) {
         if !self.cached_font.is_invalid() {
-            unsafe { let _ = DeleteObject(self.cached_font); }
+            unsafe {
+                let _ = DeleteObject(self.cached_font);
+            }
         }
     }
 }
@@ -88,7 +90,14 @@ fn create_gdi_font(font_size: i32) -> HFONT {
     let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
     unsafe {
         CreateFontW(
-            font_size, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+            font_size,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
             DEFAULT_CHARSET.0 as u32,
             OUT_DEFAULT_PRECIS.0 as u32,
             0,
@@ -134,7 +143,10 @@ impl CandidateWindow {
                 windows::core::PCWSTR::from_raw(class_wide.as_ptr()),
                 windows::core::w!("CheIME Candidate"),
                 WS_POPUP,
-                -1000, -1000, 200, 100,
+                -1000,
+                -1000,
+                200,
+                100,
                 HWND(std::ptr::null_mut()),
                 HMENU(std::ptr::null_mut()),
                 HINSTANCE(hinst.0),
@@ -158,12 +170,15 @@ impl CandidateWindow {
         Ok(Self { hwnd, ctx_ptr })
     }
 
-
     /// Hide the candidate window (e.g. on focus loss, engine disconnect).
     pub fn hide(&self) {
-        unsafe { let _ = ShowWindow(self.hwnd, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
     }
-    pub fn hwnd(&self) -> HWND { self.hwnd }
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
 
     pub fn new_context(
         thread_mgr: ITfThreadMgr,
@@ -189,7 +204,9 @@ impl CandidateWindow {
 impl Drop for CandidateWindow {
     fn drop(&mut self) {
         if !self.hwnd.is_invalid() {
-            unsafe { let _ = DestroyWindow(self.hwnd); }
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
         }
         // WM_DESTROY frees ctx_ptr; prevent double-free.
         self.ctx_ptr = std::ptr::null();
@@ -208,15 +225,17 @@ unsafe extern "system" fn candidate_window_proc(
     let ctx = || {
         let p = unsafe { GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0)) }
             as *const WindowContext;
-        if p.is_null() { None } else { Some(unsafe { &*p }) }
+        if p.is_null() {
+            None
+        } else {
+            Some(unsafe { &*p })
+        }
     };
 
     match msg {
         WM_CREATE => LRESULT(0),
 
-        WM_ERASEBKGND => {
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
+        WM_ERASEBKGND => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
 
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -226,22 +245,22 @@ unsafe extern "system" fn candidate_window_proc(
                     if let Ok(st) = ctx.snapshot.lock() {
                         if let Some((_, rows)) = st.as_ref() {
                             // Fix 3: use cached font instead of creating one per paint.
-                            unsafe { paint(hdc, rows, &ctx.config, ctx.cached_font); }
+                            unsafe {
+                                paint(hdc, rows, &ctx.config, ctx.cached_font);
+                            }
                         }
                     }
                 }
-                unsafe { let _ = EndPaint(hwnd, &ps); }
+                unsafe {
+                    let _ = EndPaint(hwnd, &ps);
+                }
             }
             LRESULT(0)
         }
 
-        WM_CHEIME_SNAPSHOT => {
-            handle_snapshot(hwnd, lparam, ctx())
-        }
+        WM_CHEIME_SNAPSHOT => handle_snapshot(hwnd, lparam, ctx()),
 
-        WM_CHEIME_ACTION => {
-            handle_action(lparam, ctx())
-        }
+        WM_CHEIME_ACTION => handle_action(lparam, ctx()),
 
         WM_CHEIME_STATUS => {
             if lparam.0 != 0 {
@@ -251,15 +270,15 @@ unsafe extern "system" fn candidate_window_proc(
                     status.0, status.1
                 ));
                 if !status.0 {
-                    unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
                 }
             }
             LRESULT(0)
         }
 
-        WM_LBUTTONDOWN => {
-            handle_click(lparam, ctx())
-        }
+        WM_LBUTTONDOWN => handle_click(lparam, ctx()),
 
         WM_DESTROY => {
             let p = unsafe { GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0)) }
@@ -305,7 +324,9 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
     // Synchronous edit session has finished; safe to release.
     unsafe { TextExtentSession::release(raw_void) };
 
-    result.take().map(|r| (r.left, r.bottom))
+    let rect = result.take();
+    tsf_log(&format!("[CheIME] GetTextExt result: {rect:?}"));
+    rect.map(|r| (r.left, r.bottom))
 }
 
 fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
@@ -317,21 +338,22 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             unsafe { Box::from_raw(lparam.0 as *mut CandidateSnapshot) };
         tsf_log(&format!(
             "[CheIME] WM_SNAPSHOT preedit={} candidates={}",
-            boxed.preedit, boxed.candidates.len()
+            boxed.preedit,
+            boxed.candidates.len()
         ));
 
         let char_width = cfg.candidate.char_width.unwrap_or(cfg.candidate.font_size);
         let line_height = cfg.candidate.line_height;
         let rows = build_rows(&boxed, line_height, char_width, &cfg.candidate);
-        let total_height = (rows.len() as i32) * line_height
-            + cfg.candidate.row_padding_y * 2;
-        let max_width = rows.iter().map(|r| r.text.len()).max().unwrap_or(0) as i32
-            * char_width
+        let total_height = (rows.len() as i32) * line_height + cfg.candidate.row_padding_y * 2;
+        let max_width = rows.iter().map(|r| r.text.len()).max().unwrap_or(0) as i32 * char_width
             + cfg.candidate.row_padding_x * 2;
 
         // Sync has_composition from engine preedit
         if !ctx.tip.is_null() {
-            unsafe { (*ctx.tip).has_composition.set(!boxed.preedit.is_empty()); }
+            unsafe {
+                (*ctx.tip).has_composition.set(!boxed.preedit.is_empty());
+            }
         }
 
         if let Ok(mut st) = ctx.snapshot.lock() {
@@ -341,15 +363,22 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         // Fix 1: Position window below composition text via GetTextExt.
         let (x, y) = get_composition_screen_rect(ctx)
             .map(|(left, bottom)| {
-                (left + cfg.window.caret_offset_x, bottom + cfg.window.caret_offset_y)
+                (
+                    left + cfg.window.caret_offset_x,
+                    bottom + cfg.window.caret_offset_y,
+                )
             })
-            .unwrap_or((cfg.window.caret_offset_x, cfg.window.caret_offset_y));
+            .unwrap_or_else(|| {
+                tsf_log("[CheIME] GetTextExt failed, using config offsets");
+                (cfg.window.caret_offset_x, cfg.window.caret_offset_y)
+            });
 
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
-                x, y,
+                x,
+                y,
                 max_width.max(cfg.window.min_width),
                 total_height.max(line_height * 2),
                 SWP_NOACTIVATE,
@@ -358,7 +387,9 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_ERASE);
         }
     } else {
-        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
     }
     LRESULT(0)
 }
@@ -366,15 +397,16 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
 fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     if lparam.0 != 0 {
-        let action: Box<PlatformAction> =
-            unsafe { Box::from_raw(lparam.0 as *mut PlatformAction) };
+        let action: Box<PlatformAction> = unsafe { Box::from_raw(lparam.0 as *mut PlatformAction) };
         tsf_log(&format!("[CheIME] WM_ACTION action={action:?}"));
         match unsafe { ctx.thread_mgr.GetFocus() } {
             Ok(doc) => match unsafe { doc.GetTop() } {
                 Ok(context) => {
                     tsf_log("[CheIME] WM_ACTION: requesting edit session");
                     request_edit_session(
-                        ctx.client_id, &context, *action,
+                        ctx.client_id,
+                        &context,
+                        *action,
                         &ctx.channel as *const SyncSender<FrontendMessage>,
                         &ctx.composition as *const Mutex<Option<ITfComposition>>,
                     );
@@ -400,7 +432,10 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     if let Ok(guard) = ctx.snapshot.lock() {
         if let Some((snap, _rows)) = guard.as_ref() {
             let hit_index = hit_test_candidate(
-                &layout_snapshot(snap, line_height, char_width), x, y, line_height,
+                &layout_snapshot(snap, line_height, char_width),
+                x,
+                y,
+                line_height,
             );
             if let Some(idx) = hit_index {
                 let candidate = snap.candidates.get(idx.saturating_sub(1));
@@ -409,13 +444,17 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
                         id: cheime_model::ActionId::new(0),
                         epoch: snap.epoch,
                         revision: snap.revision,
-                        kind: PlatformActionKind::Commit { text: cand.text.clone() },
+                        kind: PlatformActionKind::Commit {
+                            text: cand.text.clone(),
+                        },
                     };
                     tsf_log(&format!("[CheIME] Click commit: {}", cand.text));
                     if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
                         if let Ok(context) = unsafe { doc.GetTop() } {
                             request_edit_session(
-                                ctx.client_id, &context, action,
+                                ctx.client_id,
+                                &context,
+                                action,
                                 &ctx.channel as *const SyncSender<FrontendMessage>,
                                 &ctx.composition as *const Mutex<Option<ITfComposition>>,
                             );
@@ -456,7 +495,9 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
         }
     }
     if !old.is_invalid() {
-        unsafe { SelectObject(hdc, old); }
+        unsafe {
+            SelectObject(hdc, old);
+        }
     }
     // Do NOT delete the font — it is cached in WindowContext.
 }
@@ -480,7 +521,9 @@ fn build_rows(
         y += line_height;
     }
     for row in &layout.rows {
-        if row.is_preedit { continue; }
+        if row.is_preedit {
+            continue;
+        }
         let mut s = String::new();
         use std::fmt::Write;
         if let Some(idx) = row.index {
@@ -520,7 +563,9 @@ fn parse_hex(s: &str) -> Option<COLORREF> {
         }
         _ => return None,
     };
-    Some(COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16)))
+    Some(COLORREF(
+        (r as u32) | ((g as u32) << 8) | ((b as u32) << 16),
+    ))
 }
 
 // ── TextExtent edit session (for GetTextExt) ──────────────────────────
@@ -547,7 +592,9 @@ impl TextExtentSession {
         })
     }
 
-    unsafe fn from_raw(this: *mut c_void) -> *mut Self { this.cast() }
+    unsafe fn from_raw(this: *mut c_void) -> *mut Self {
+        this.cast()
+    }
 
     unsafe fn add_ref(this: *mut c_void) -> u32 {
         let cb = unsafe { &*Self::from_raw(this) };
@@ -609,7 +656,11 @@ unsafe extern "system" fn tes_do_edit_session(this: *mut c_void, ec: u32) -> HRE
     let session = unsafe { &*(this as *const TextExtentSession) };
     let mut rect = RECT::default();
     let mut clipped = BOOL(0);
-    let hr = unsafe { session.view.GetTextExt(ec, &session.range, &mut rect, &mut clipped) };
+    let hr = unsafe {
+        session
+            .view
+            .GetTextExt(ec, &session.range, &mut rect, &mut clipped)
+    };
     if hr.is_ok() {
         unsafe { (*session.result).set(Some(rect)) };
     }
@@ -631,9 +682,9 @@ mod tests {
     #[test]
     fn parse_hex_6_digit() {
         let c = parse_hex("#1e1e2e").unwrap();
-        assert_eq!(c.0 & 0xff, 0x1e);        // R
+        assert_eq!(c.0 & 0xff, 0x1e); // R
         assert_eq!((c.0 >> 8) & 0xff, 0x1e); // G
-        assert_eq!((c.0 >> 16) & 0xff, 0x2e);// B
+        assert_eq!((c.0 >> 16) & 0xff, 0x2e); // B
     }
 
     #[test]
@@ -649,7 +700,9 @@ mod tests {
 
     #[test]
     fn build_rows_with_config() {
-        use cheime_model::{Candidate, CandidateId, DeploymentGeneration, Revision, SessionEpoch, SessionStatus};
+        use cheime_model::{
+            Candidate, CandidateId, DeploymentGeneration, Revision, SessionEpoch, SessionStatus,
+        };
         let snap = CandidateSnapshot {
             epoch: SessionEpoch::new(1),
             revision: Revision::new(1),
@@ -659,8 +712,20 @@ mod tests {
             preedit: "ni".into(),
             cursor: 2,
             candidates: vec![
-                Candidate { id: CandidateId::new(1), text: "你".into(), annotation: Some("ni3".into()), source: "dict".into(), is_emoji: false },
-                Candidate { id: CandidateId::new(2), text: "尼".into(), annotation: None, source: "dict".into(), is_emoji: false },
+                Candidate {
+                    id: CandidateId::new(1),
+                    text: "你".into(),
+                    annotation: Some("ni3".into()),
+                    source: "dict".into(),
+                    is_emoji: false,
+                },
+                Candidate {
+                    id: CandidateId::new(2),
+                    text: "尼".into(),
+                    annotation: None,
+                    source: "dict".into(),
+                    is_emoji: false,
+                },
             ],
             highlighted: Some(CandidateId::new(1)),
             status: SessionStatus::Composing,

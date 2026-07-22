@@ -25,11 +25,29 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--pipe" => { i += 1; if i < args.len() { pipe_name = args[i].clone(); } }
-            "--dict-dir" => { i += 1; if i < args.len() { dict_dir = Some(PathBuf::from(&args[i])); } }
-            "--config" => { i += 1; if i < args.len() { config_path = Some(PathBuf::from(&args[i])); } }
+            "--pipe" => {
+                i += 1;
+                if i < args.len() {
+                    pipe_name = args[i].clone();
+                }
+            }
+            "--dict-dir" => {
+                i += 1;
+                if i < args.len() {
+                    dict_dir = Some(PathBuf::from(&args[i]));
+                }
+            }
+            "--config" => {
+                i += 1;
+                if i < args.len() {
+                    config_path = Some(PathBuf::from(&args[i]));
+                }
+            }
             "--stdin" => stdin_mode = true,
-            "--help" => { print_usage(); return; }
+            "--help" => {
+                print_usage();
+                return;
+            }
             _ => {}
         }
         i += 1;
@@ -50,13 +68,16 @@ fn main() {
 
     // ── Pipe server mode ──────────────────────────────────────────────
     let config_path = config_path.unwrap_or_else(|| {
-        data_dir().join("config").join("schemas").join("quanpin.yaml")
+        data_dir()
+            .join("config")
+            .join("schemas")
+            .join("quanpin.yaml")
     });
     let config = load_config(&config_path);
 
     let db_path = data_dir().join("user_data.db");
-    let user_store = UserStore::open("engine-host", &db_path)
-        .unwrap_or_else(|_| UserStore::new("engine-host"));
+    let user_store =
+        UserStore::open("engine-host", &db_path).unwrap_or_else(|_| UserStore::new("engine-host"));
     let store = Arc::new(Mutex::new(user_store));
 
     eprintln!("Starting named pipe server...");
@@ -69,20 +90,31 @@ fn main() {
 fn load_index(dict_dir: &PathBuf) -> Arc<CompiledIndex> {
     if !dict_dir.exists() {
         eprintln!("Dictionary directory not found, using empty index");
-        return Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)));
+        return Arc::new(CompiledIndex::build(
+            vec![],
+            cheime_model::DeploymentGeneration::new(1),
+        ));
     }
     let files: Vec<PathBuf> = std::fs::read_dir(dict_dir)
         .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
         .unwrap_or_default();
     let cache = DictCache::new(data_dir().join("cache"));
-    match cache.load_or_build(&files, "dictionaries", &[DictColumn::Text, DictColumn::Code, DictColumn::Weight], cheime_model::DeploymentGeneration::new(1)) {
+    match cache.load_or_build(
+        &files,
+        "dictionaries",
+        &[DictColumn::Text, DictColumn::Code, DictColumn::Weight],
+        cheime_model::DeploymentGeneration::new(1),
+    ) {
         Ok(idx) => {
             eprintln!("Loaded {} entries", idx.total_entries());
             Arc::new(idx)
         }
         Err(e) => {
             eprintln!("warning: dict cache error: {e}, using empty index");
-            Arc::new(CompiledIndex::build(vec![], cheime_model::DeploymentGeneration::new(1)))
+            Arc::new(CompiledIndex::build(
+                vec![],
+                cheime_model::DeploymentGeneration::new(1),
+            ))
         }
     }
 }
@@ -99,7 +131,10 @@ engine:
     - type: uniquifier
 "#;
     let yaml = std::fs::read_to_string(config_path).unwrap_or_else(|_| fallback.to_string());
-    let parent_dir = config_path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let parent_dir = config_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     let loader = cheime_config::ConfigLoader::new().with_base_dir(parent_dir);
     loader.load(&yaml).unwrap_or_else(|e| {
         eprintln!("warning: config load failed ({e}), using minimal config");
@@ -119,7 +154,8 @@ fn run_stdin_mode(index: Arc<CompiledIndex>) {
     use cheime_session::Session;
     use std::io::{self, BufRead, Write};
 
-    let config: SchemaConfig = serde_yaml::from_str(r#"schema_version: 1
+    let config: SchemaConfig = serde_yaml::from_str(
+        r#"schema_version: 1
 engine:
   segmentors:
     - type: pinyin_syllable
@@ -130,7 +166,9 @@ engine:
       emoji_data: data/emoji.txt
   filters:
     - type: uniquifier
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let store = Arc::new(Mutex::new(UserStore::new("stdin")));
     let pipeline = PipelineFactory::build(&config, Some(store), Some(index), None).unwrap();
@@ -151,8 +189,12 @@ engine:
     let stdin = io::stdin();
     for line in stdin.lock().lines().flatten() {
         let line = line.trim().to_string();
-        if line.is_empty() { continue; }
-        if line == "quit" || line == "exit" { break; }
+        if line.is_empty() {
+            continue;
+        }
+        if line == "quit" || line == "exit" {
+            break;
+        }
 
         let msg: FrontendMessage = match serde_json::from_str(&line) {
             Ok(msg) => msg,
@@ -191,10 +233,13 @@ engine:
 }
 
 fn data_dir() -> PathBuf {
-    std::env::var("CHEIME_DATA_DIR").ok().map(PathBuf::from).unwrap_or_else(|| {
-        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        PathBuf::from(local).join("cheime")
-    })
+    std::env::var("CHEIME_DATA_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            PathBuf::from(local).join("cheime")
+        })
 }
 
 fn print_usage() {

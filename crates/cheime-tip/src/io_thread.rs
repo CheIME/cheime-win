@@ -137,9 +137,16 @@ fn io_thread_main(
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(25);
             match reader.read_message_until(&codec, deadline) {
                 Ok(Some(msg)) => {
-                    if session.observe_engine(&msg).is_err() {
-                        tsf_log("[CheIME] IO: engine identity mismatch, reconnecting");
-                        continue 'reconnect;
+                    match session.observe_engine(&msg) {
+                        Ok(()) => {}
+                        Err(e) if e == "stale epoch" => {
+                            // Silently discard stale messages from previous sessions
+                            continue;
+                        }
+                        Err(e) => {
+                            tsf_log(&format!("[CheIME] IO: identity error: {e}, reconnecting"));
+                            continue 'reconnect;
+                        }
                     }
                     match msg {
                         EngineMessage::CandidateSnapshot { snapshot, .. } => {
@@ -286,7 +293,10 @@ struct FrontendSession {
 
 impl FrontendSession {
     fn new(state: AcknowledgedState) -> Self {
-        Self { state, next_sequence: 1 }
+        Self {
+            state,
+            next_sequence: 1,
+        }
     }
 
     /// Validate engine messages against session identity.
@@ -299,17 +309,27 @@ impl FrontendSession {
             | EngineMessage::SessionClosed { header } => header,
             EngineMessage::ProtocolRejected { .. } => return Err("protocol rejected".into()),
         };
+        // Protocol version or client mismatch → real error, reconnect
         if header.protocol_version != cheime_model::CORE_PROTOCOL_VERSION
             || header.client != self.state.client
             || header.session != self.state.session
-            || header.epoch != self.state.epoch
         {
             return Err("engine identity mismatch".into());
+        }
+        // Stale epoch → silently discard (don't reconnect)
+        if header.epoch != self.state.epoch {
+            tsf_log(&format!(
+                "[CheIME] IO: discarding stale epoch message (expected={:?} got={:?})",
+                self.state.epoch, header.epoch
+            ));
+            return Err("stale epoch".into());
         }
         // Lazy deployment capture on first valid message
         match self.state.deployment {
             None => self.state.deployment = Some(header.deployment),
-            Some(d) if d != header.deployment => return Err("deployment changed mid-session".into()),
+            Some(d) if d != header.deployment => {
+                return Err("deployment changed mid-session".into());
+            }
             _ => {}
         }
         self.state.revision = header.revision;
@@ -317,7 +337,10 @@ impl FrontendSession {
     }
 
     fn prepare(&mut self, message: FrontendMessage) -> FrontendMessage {
-        let deployment = self.state.deployment.unwrap_or(cheime_model::DeploymentGeneration::new(1));
+        let deployment = self
+            .state
+            .deployment
+            .unwrap_or(cheime_model::DeploymentGeneration::new(1));
         let header = cheime_protocol::MessageHeader {
             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
             client: self.state.client,
@@ -331,9 +354,15 @@ impl FrontendSession {
         match message {
             FrontendMessage::OpenSession { .. } => FrontendMessage::OpenSession { header },
             FrontendMessage::CloseSession { .. } => FrontendMessage::CloseSession { header },
-            FrontendMessage::KeyCommand { event, .. } => FrontendMessage::KeyCommand { header, event },
-            FrontendMessage::UiCommand { command, .. } => FrontendMessage::UiCommand { header, command },
-            FrontendMessage::PlatformActionResult { result, .. } => FrontendMessage::PlatformActionResult { header, result },
+            FrontendMessage::KeyCommand { event, .. } => {
+                FrontendMessage::KeyCommand { header, event }
+            }
+            FrontendMessage::UiCommand { command, .. } => {
+                FrontendMessage::UiCommand { header, command }
+            }
+            FrontendMessage::PlatformActionResult { result, .. } => {
+                FrontendMessage::PlatformActionResult { header, result }
+            }
         }
     }
 }

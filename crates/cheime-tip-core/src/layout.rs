@@ -16,9 +16,7 @@ pub const INDEX_PADDING: i32 = 4;
 ///
 /// ASCII characters count as 1 column; non-ASCII (e.g. CJK) as 2.
 fn display_width(text: &str) -> i32 {
-    text.chars()
-        .map(|c| if c.is_ascii() { 1 } else { 2 })
-        .sum()
+    text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
 /// Describes how to render one row of the candidate window.

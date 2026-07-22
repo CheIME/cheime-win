@@ -203,6 +203,9 @@ fn handle_commit(
     composition_ptr: *const Mutex<Option<ITfComposition>>,
     action: &PlatformAction,
 ) -> HRESULT {
+    tsf_log(&format!(
+        "[CheIME] handle_commit START text={text:?} ec={ec}"
+    ));
     let result = 'work: {
         let comp_mutex = unsafe { &*composition_ptr };
         let guard = match comp_mutex.lock() {
@@ -212,7 +215,9 @@ fn handle_commit(
         let comp = match guard.as_ref() {
             Some(c) => c,
             None => {
-                tsf_log("[CheIME] commit: no active composition — trying commit-at-selection");
+                tsf_log(
+                    "[CheIME] commit: NO ACTIVE COMPOSITION — falling back to commit_at_selection",
+                );
                 break 'work commit_at_selection(ec, context, text);
             }
         };
@@ -243,12 +248,21 @@ fn handle_commit(
 
         drop(guard);
         match end_active_composition(ec, composition_ptr) {
-            Ok(()) => {}
-            Err(e) => break 'work Err(e),
+            Ok(()) => {
+                tsf_log("[CheIME] handle_commit: end_active_composition OK");
+            }
+            Err(e) => {
+                tsf_log(&format!(
+                    "[CheIME] handle_commit: end_active_composition FAILED: {e}"
+                ));
+                break 'work Err(e);
+            }
         }
+        tsf_log("[CheIME] handle_commit SUCCESS");
         Ok(())
     };
 
+    tsf_log(&format!("[CheIME] handle_commit RESULT: {result:?}"));
     send_result(action, channel_ptr, &result);
     S_OK
 }
@@ -365,12 +379,21 @@ fn handle_cancel_composition(
         }
         drop(guard);
         match end_active_composition(ec, composition_ptr) {
-            Ok(()) => {}
-            Err(e) => break 'work Err(e),
+            Ok(()) => {
+                tsf_log("[CheIME] handle_commit: end_active_composition OK");
+            }
+            Err(e) => {
+                tsf_log(&format!(
+                    "[CheIME] handle_commit: end_active_composition FAILED: {e}"
+                ));
+                break 'work Err(e);
+            }
         }
+        tsf_log("[CheIME] handle_commit SUCCESS");
         Ok(())
     };
 
+    tsf_log(&format!("[CheIME] handle_commit RESULT: {result:?}"));
     send_result(action, channel_ptr, &result);
     S_OK
 }
@@ -530,7 +553,11 @@ pub fn request_edit_session(
 
     // Request a synchronous write edit session.
     let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0);
+    tsf_log(&format!(
+        "[CheIME] RequestEditSession: client_id={client_id} flags={flags:?}"
+    ));
     let hr = unsafe { context.RequestEditSession(client_id, session_ref, flags) };
+    tsf_log(&format!("[CheIME] RequestEditSession result: {hr:?}"));
 
     // Release our reference.  If TSF took a reference during the call it has
     // already released it by now (synchronous call), so the count reaches zero

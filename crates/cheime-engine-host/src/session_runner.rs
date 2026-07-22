@@ -39,9 +39,7 @@ where
         let message: FrontendMessage = reader
             .read_message(&codec)
             .map_err(RunnerError::Pipe)?
-            .ok_or(RunnerError::Pipe(
-                cheime_tip_core::PipeError::Disconnected,
-            ))?;
+            .ok_or(RunnerError::Pipe(cheime_tip_core::PipeError::Disconnected))?;
 
         let responses = session
             .handle(message)
@@ -135,6 +133,9 @@ engine:
             },
         };
         let responses = session.handle(msg).unwrap();
-        assert!(!responses.is_empty(), "should return at least one candidate snapshot");
+        assert!(
+            !responses.is_empty(),
+            "should return at least one candidate snapshot"
+        );
     }
 }
