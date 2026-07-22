@@ -297,7 +297,7 @@ unsafe extern "system" fn candidate_window_proc(
 
 /// Get the screen (left, bottom) of the composition text via a synchronous
 /// Get the screen position for the candidate window.
-/// Tries GetTextExt (TSF composition range), then GetCaretPos (system caret).
+/// Tries: (1) TSF GetTextExt, (2) GetGUIThreadInfo caret rect.
 fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
     // Try 1: TSF GetTextExt via edit session
     if let Some(pos) = try_get_text_ext(ctx) {
@@ -305,29 +305,29 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
         return Some(pos);
     }
 
-    // Try 2: System caret position (works in most apps including Notepad)
-    let mut point = POINT::default();
-    if unsafe { GetCaretPos(&mut point) }.is_ok() {
-        // Convert client coordinates to screen coordinates
-        // We need the focused window handle
-        if let Ok(doc) = unsafe { ctx.thread_mgr.GetFocus() } {
-            if let Ok(context) = unsafe { doc.GetTop() } {
-                if let Ok(view) = unsafe { context.GetActiveView() } {
-                    let mut hwnd = HWND::default();
-                    if let Ok(hwnd) = unsafe { view.GetWnd() } && !hwnd.is_invalid() {
-                        let mut screen_point = point;
-                        unsafe { ClientToScreen(hwnd, &mut screen_point) };
-                        tsf_log(&format!(
-                            "[CheIME] CaretPos fallback: client=({}, {}) screen=({}, {})",
-                            point.x, point.y, screen_point.x, screen_point.y
-                        ));
-                        return Some((screen_point.x, screen_point.y));
-                    }
-                }
+    // Try 2: GetGUIThreadInfo — returns the caret rect in screen coordinates
+    // This works with TSF applications that may not have a system caret.
+    use windows::Win32::UI::WindowsAndMessaging::{GetGUIThreadInfo, GUITHREADINFO};
+    let mut gui_info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // Thread 0 = foreground thread
+    if unsafe { GetGUIThreadInfo(0, &mut gui_info) }.is_ok() {
+        let rc = gui_info.rcCaret;
+        if rc.left != 0 || rc.right != 0 {
+            // rcCaret is in client coordinates of hwndCaret
+            let hwnd = gui_info.hwndCaret;
+            if !hwnd.is_invalid() {
+                let mut screen_point = POINT { x: rc.left, y: rc.bottom };
+                unsafe { ClientToScreen(hwnd, &mut screen_point) };
+                tsf_log(&format!(
+                    "[CheIME] GetGUIThreadInfo: caret=({}, {}) screen=({}, {})",
+                    rc.left, rc.bottom, screen_point.x, screen_point.y
+                ));
+                return Some((screen_point.x, screen_point.y));
             }
         }
-        tsf_log(&format!("[CheIME] CaretPos client: ({}, {})", point.x, point.y));
-        return Some((point.x, point.y));
     }
 
     tsf_log("[CheIME] All cursor position methods failed");
