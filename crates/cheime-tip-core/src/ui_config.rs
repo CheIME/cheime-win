@@ -21,6 +21,9 @@ pub struct UiConfig {
     pub candidate: CandidateConfig,
 
     #[serde(default)]
+    pub selection_box: SelectionBoxConfig,
+
+    #[serde(default)]
     pub theme: ThemeConfig,
 }
 
@@ -44,6 +47,14 @@ pub struct WindowConfig {
 
     #[serde(default = "d200")]
     pub min_width: i32,
+
+    /// Fixed window height in pixels. Zero means content-driven.
+    #[serde(default)]
+    pub height: i32,
+
+    /// Corner radius in pixels, clamped to half the rendered height.
+    #[serde(default = "d8")]
+    pub corner_radius: i32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -64,6 +75,9 @@ fn d_pad() -> [i32; 2] {
 }
 fn d200() -> i32 {
     200
+}
+fn d8() -> i32 {
+    8
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -89,6 +103,39 @@ pub struct CandidateConfig {
 
     #[serde(default = "d14")]
     pub label_size: i32,
+
+    #[serde(default)]
+    pub orientation: CandidateOrientation,
+
+    #[serde(default = "bool_true")]
+    pub show_labels: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CandidateOrientation {
+    Horizontal,
+    #[default]
+    Vertical,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionBoxConfig {
+    #[serde(default = "selection_outline")]
+    pub outline_color: String,
+
+    /// None inherits the candidate window's outer corner radius.
+    #[serde(default)]
+    pub corner_radius: Option<i32>,
+
+    /// Relative size of the candidate item, clamped to 0.0..=1.0.
+    #[serde(default = "d1_0")]
+    pub relative_size: f32,
+}
+
+fn selection_outline() -> String {
+    String::from("#0078d4")
 }
 
 fn d18() -> i32 {
@@ -191,6 +238,16 @@ impl Default for ThemeConfig {
     }
 }
 
+impl Default for SelectionBoxConfig {
+    fn default() -> Self {
+        Self {
+            outline_color: selection_outline(),
+            corner_radius: None,
+            relative_size: 1.0,
+        }
+    }
+}
+
 impl Default for CandidateConfig {
     fn default() -> Self {
         Self {
@@ -201,6 +258,8 @@ impl Default for CandidateConfig {
             row_padding_y: 2,
             page_size: 10,
             label_size: 14,
+            orientation: CandidateOrientation::Vertical,
+            show_labels: true,
         }
     }
 }
@@ -214,6 +273,8 @@ impl Default for WindowConfig {
             caret_offset_x: 0,
             caret_offset_y: 0,
             min_width: 200,
+            height: 0,
+            corner_radius: 8,
         }
     }
 }
@@ -240,6 +301,7 @@ impl UiConfig {
             },
             window: WindowConfig::merge(&parent.window, &child.window),
             candidate: CandidateConfig::merge(&parent.candidate, &child.candidate),
+            selection_box: SelectionBoxConfig::merge(&parent.selection_box, &child.selection_box),
             theme: ThemeConfig::merge(&parent.theme, &child.theme),
         }
     }
@@ -258,6 +320,8 @@ impl WindowConfig {
             caret_offset_x: merge_field!(parent, child, caret_offset_x, 0),
             caret_offset_y: merge_field!(parent, child, caret_offset_y, 0),
             min_width: merge_field!(parent, child, min_width, 200),
+            height: merge_field!(parent, child, height, 0),
+            corner_radius: merge_field!(parent, child, corner_radius, 8),
         }
     }
 }
@@ -272,6 +336,26 @@ impl CandidateConfig {
             row_padding_y: merge_field!(parent, child, row_padding_y, 2),
             page_size: merge_field!(parent, child, page_size, 10),
             label_size: merge_field!(parent, child, label_size, 14),
+            orientation: if child.orientation != CandidateOrientation::Vertical {
+                child.orientation.clone()
+            } else {
+                parent.orientation.clone()
+            },
+            show_labels: child.show_labels,
+        }
+    }
+}
+
+impl SelectionBoxConfig {
+    fn merge(parent: &Self, child: &Self) -> Self {
+        Self {
+            outline_color: merge_color(
+                &parent.outline_color,
+                &child.outline_color,
+                selection_outline(),
+            ),
+            corner_radius: child.corner_radius.or(parent.corner_radius),
+            relative_size: merge_field!(parent, child, relative_size, 1.0),
         }
     }
 }
@@ -497,5 +581,35 @@ mod tests {
         let cfg: UiConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.window.material, Material::Mica);
         assert_eq!(cfg.window.opacity, 0.85);
+    }
+
+    #[test]
+    fn custom_candidate_visual_fields_parse() {
+        let yaml = "\
+window:
+  height: 56
+  corner_radius: 28
+candidate:
+  page_size: 5
+  orientation: horizontal
+  show_labels: false
+selection_box:
+  outline_color: '#ff00aa'
+  corner_radius: 6
+  relative_size: 0.8
+theme:
+  colors:
+    background: '#202020'
+";
+        let cfg: UiConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.window.height, 56);
+        assert_eq!(cfg.window.corner_radius, 28);
+        assert_eq!(cfg.candidate.page_size, 5);
+        assert_eq!(cfg.candidate.orientation, CandidateOrientation::Horizontal);
+        assert!(!cfg.candidate.show_labels);
+        assert_eq!(cfg.selection_box.outline_color, "#ff00aa");
+        assert_eq!(cfg.selection_box.corner_radius, Some(6));
+        assert_eq!(cfg.selection_box.relative_size, 0.8);
+        assert_eq!(cfg.theme.colors.background, "#202020");
     }
 }

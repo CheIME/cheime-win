@@ -221,6 +221,7 @@ dependencies = [
  "cheime-wire",
  "serde",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

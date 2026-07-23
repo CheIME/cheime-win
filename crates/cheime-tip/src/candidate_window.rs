@@ -8,8 +8,7 @@ use crate::io_thread::{WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
 use crate::tsf_interfaces::{ComTip, tsf_log};
 use cheime_model::{CandidateSnapshot, PlatformAction};
 use cheime_protocol::FrontendMessage;
-use cheime_tip_core::layout::{hit_test_candidate, layout_snapshot};
-use cheime_tip_core::ui_config::UiConfig;
+use cheime_tip_core::ui_config::{CandidateOrientation, UiConfig};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -20,22 +19,25 @@ use windows::Win32::Foundation::{
     BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
-    ClientToScreen, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject,
-    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, OPAQUE, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkColor, SetBkMode,
-    SetTextColor, TRANSPARENT, TextOutW,
+    BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen, CreateFontW, CreateRectRgn,
+    CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint,
+    FF_DONTCARE, FW_NORMAL, FillRect, FrameRgn, GetSysColor, HBRUSH, HDC, HFONT,
+    InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow,
+    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
     TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HMENU,
-    HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetWindowLongPtrW, HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE,
+    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSELEAVE, WM_MOUSEMOVE, WM_PAINT,
+    WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -53,7 +55,10 @@ pub type SnapshotBox = Mutex<Option<(CandidateSnapshot, Vec<RowRender>)>>;
 
 pub struct RowRender {
     pub text: Vec<u16>,
+    pub x: i32,
     pub y: i32,
+    pub bounds: RECT,
+    pub candidate_index: Option<usize>,
     pub highlighted: bool,
 }
 
@@ -188,7 +193,7 @@ impl CandidateWindow {
         channel: SyncSender<FrontendMessage>,
         tip: *mut ComTip,
     ) -> Box<WindowContext> {
-        let config = UiConfig::default();
+        let config = crate::ui_settings::load_config();
         let cached_font = create_gdi_font(config.candidate.font_size);
         Box::new(WindowContext {
             snapshot: Mutex::new(None),
@@ -244,6 +249,18 @@ unsafe extern "system" fn candidate_window_proc(
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             if !hdc.is_invalid() {
                 if let Some(ctx) = ctx() {
+                    let background = parse_hex(&ctx.config.theme.colors.background)
+                        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOW) }));
+                    let brush = unsafe { CreateSolidBrush(background) };
+                    let mut client = RECT::default();
+                    if unsafe { GetClientRect(hwnd, &mut client) }.is_ok() {
+                        unsafe {
+                            FillRect(hdc, &client, brush);
+                        }
+                    }
+                    unsafe {
+                        let _ = DeleteObject(brush);
+                    }
                     if let Ok(st) = ctx.snapshot.lock() {
                         if let Some((_, rows)) = st.as_ref() {
                             // Fix 3: use cached font instead of creating one per paint.
@@ -281,6 +298,10 @@ unsafe extern "system" fn candidate_window_proc(
         }
 
         WM_LBUTTONDOWN => handle_click(lparam, ctx()),
+
+        WM_MOUSEMOVE => handle_mouse_move(hwnd, lparam, ctx()),
+
+        WM_MOUSELEAVE => handle_mouse_leave(hwnd, ctx()),
 
         WM_DESTROY => {
             let p = unsafe { GetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_USERDATA.0)) }
@@ -426,13 +447,21 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             boxed.candidates.len()
         ));
 
-        let char_width = cfg.candidate.char_width.unwrap_or(cfg.candidate.font_size);
-        let line_height = cfg.candidate.line_height;
-        let rows = build_rows(&boxed, line_height, char_width, &cfg.candidate);
-        let total_height = (rows.len() as i32) * line_height + cfg.candidate.row_padding_y * 2;
-        let max_width = rows.iter().map(|r| r.text.len()).max().unwrap_or(0) as i32 * char_width
-            + cfg.candidate.row_padding_x * 2;
-
+        let char_width = cfg
+            .candidate
+            .char_width
+            .unwrap_or(cfg.candidate.font_size)
+            .max(1);
+        let line_height = cfg.candidate.line_height.max(1);
+        let (rows, content_width, content_height) =
+            build_rows(&boxed, line_height, char_width, &cfg.candidate);
+        let window_width = content_width.max(cfg.window.min_width).max(1);
+        let window_height = if cfg.window.height > 0 {
+            cfg.window.height
+        } else {
+            content_height
+        }
+        .max(1);
         // Sync has_composition from engine preedit
         if !ctx.tip.is_null() {
             unsafe {
@@ -471,10 +500,11 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 HWND_TOPMOST,
                 x,
                 y,
-                max_width.max(cfg.window.min_width),
-                total_height.max(line_height * 2),
+                window_width,
+                window_height,
                 SWP_NOACTIVATE,
             );
+            apply_corner_radius(hwnd, window_width, window_height, cfg.window.corner_radius);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_ERASE);
         }
@@ -515,22 +545,20 @@ fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
 // Fix 2: Single lock scope — eliminates TOCTOU race between hit_test and candidate lookup.
 fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
-    let cfg = &ctx.config;
     let x = (lparam.0 as u16) as i32;
     let y = ((lparam.0 >> 16) as u16) as i32;
-    let char_width = cfg.candidate.char_width.unwrap_or(cfg.candidate.font_size);
-    let line_height = cfg.candidate.line_height;
 
     if let Ok(guard) = ctx.snapshot.lock() {
-        if let Some((snap, _rows)) = guard.as_ref() {
-            let hit_index = hit_test_candidate(
-                &layout_snapshot(snap, line_height, char_width),
-                x,
-                y,
-                line_height,
-            );
+        if let Some((snap, rows)) = guard.as_ref() {
+            let hit_index = rows.iter().find_map(|row| {
+                let hit = x >= row.bounds.left
+                    && x < row.bounds.right
+                    && y >= row.bounds.top
+                    && y < row.bounds.bottom;
+                hit.then_some(row.candidate_index).flatten()
+            });
             if let Some(idx) = hit_index {
-                let candidate = snap.candidates.get(idx.saturating_sub(1));
+                let candidate = snap.candidates.get(idx);
                 if let Some(cand) = candidate {
                     tsf_log(&format!("[CheIME] Click select: {}", cand.text));
                     let _ = ctx.channel.try_send(FrontendMessage::UiCommand {
@@ -562,25 +590,19 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
 unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
     let fg = parse_hex(&config.theme.colors.candidate_text)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
-    let hl_bg = parse_hex(&config.theme.colors.selected_background)
-        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHT) }));
-    let hl_fg = parse_hex(&config.theme.colors.selected_text)
-        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHTTEXT) }));
+    let outline = parse_hex(&config.selection_box.outline_color)
+        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
 
     let old = unsafe { SelectObject(hdc, font) };
 
-    let pad_x = config.candidate.row_padding_x;
     for row in rows {
         unsafe {
             if row.highlighted {
-                SetBkColor(hdc, hl_bg);
-                SetTextColor(hdc, hl_fg);
-                SetBkMode(hdc, OPAQUE);
-            } else {
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, fg);
+                draw_selection_box(hdc, row, config, outline);
             }
-            let _ = TextOutW(hdc, pad_x, row.y, &row.text);
+            SetTextColor(hdc, fg);
+            SetBkMode(hdc, TRANSPARENT);
+            let _ = TextOutW(hdc, row.x, row.y, &row.text);
         }
     }
     if !old.is_invalid() {
@@ -596,41 +618,198 @@ fn build_rows(
     line_height: i32,
     char_width: i32,
     config: &cheime_tip_core::ui_config::CandidateConfig,
-) -> Vec<RowRender> {
-    let layout = layout_snapshot(snapshot, line_height, char_width);
+) -> (Vec<RowRender>, i32, i32) {
     let mut rows = Vec::new();
-    let mut y = config.row_padding_y;
+    let pad_x = config.row_padding_x.max(0);
+    let pad_y = config.row_padding_y.max(0);
+    let mut y = pad_y;
 
-    if !layout.preedit.is_empty() {
+    if !snapshot.preedit.is_empty() {
+        let width = text_pixel_width(&snapshot.preedit, char_width);
         rows.push(RowRender {
-            text: layout.preedit.encode_utf16().collect(),
+            text: snapshot.preedit.encode_utf16().collect(),
+            x: pad_x,
             y,
+            bounds: RECT {
+                left: 0,
+                top: y,
+                right: width + pad_x * 2,
+                bottom: y + line_height,
+            },
+            candidate_index: None,
             highlighted: false,
         });
         y += line_height;
     }
-    for row in &layout.rows {
-        if row.is_preedit {
-            continue;
-        }
-        let mut s = String::new();
-        use std::fmt::Write;
-        if let Some(idx) = row.index {
-            let _ = write!(s, "{}. {}", idx, row.text);
-            if let Some(ann) = &row.annotation {
-                let _ = write!(s, " {}", ann);
+
+    let candidates = snapshot
+        .candidates
+        .iter()
+        .take(config.page_size.max(1))
+        .enumerate()
+        .map(|(index, candidate)| {
+            let mut text = String::new();
+            use std::fmt::Write;
+            if config.show_labels {
+                let label = if index == 9 { 0 } else { index + 1 };
+                let _ = write!(text, "{label}. ");
             }
-        } else {
-            s = row.text.clone();
+            text.push_str(&candidate.text);
+            if let Some(annotation) = &candidate.annotation {
+                let _ = write!(text, " {annotation}");
+            }
+            (index, candidate, text)
+        })
+        .collect::<Vec<_>>();
+
+    match config.orientation {
+        CandidateOrientation::Vertical => {
+            for (index, candidate, text) in candidates {
+                let width = text_pixel_width(&text, char_width);
+                rows.push(RowRender {
+                    text: text.encode_utf16().collect(),
+                    x: pad_x,
+                    y,
+                    bounds: RECT {
+                        left: 0,
+                        top: y,
+                        right: width + pad_x * 2,
+                        bottom: y + line_height,
+                    },
+                    candidate_index: Some(index),
+                    highlighted: snapshot.highlighted == Some(candidate.id),
+                });
+                y += line_height;
+            }
         }
-        rows.push(RowRender {
-            text: s.encode_utf16().collect(),
-            y,
-            highlighted: row.is_highlighted,
-        });
-        y += line_height;
+        CandidateOrientation::Horizontal => {
+            let mut x = 0;
+            for (index, candidate, text) in candidates {
+                let width = text_pixel_width(&text, char_width);
+                let right = x + width + pad_x * 2;
+                rows.push(RowRender {
+                    text: text.encode_utf16().collect(),
+                    x: x + pad_x,
+                    y,
+                    bounds: RECT {
+                        left: x,
+                        top: y,
+                        right,
+                        bottom: y + line_height,
+                    },
+                    candidate_index: Some(index),
+                    highlighted: snapshot.highlighted == Some(candidate.id),
+                });
+                x = right;
+            }
+            if rows.iter().any(|row| row.candidate_index.is_some()) {
+                y += line_height;
+            }
+        }
     }
-    rows
+
+    let width = rows
+        .iter()
+        .map(|row| row.bounds.right)
+        .max()
+        .unwrap_or(0)
+        .max(pad_x * 2);
+    let height = (y + pad_y).max(line_height);
+    (rows, width, height)
+}
+
+fn text_pixel_width(text: &str, char_width: i32) -> i32 {
+    text.chars()
+        .map(|character| {
+            if character.is_ascii() {
+                (char_width + 1) / 2
+            } else {
+                char_width
+            }
+        })
+        .sum()
+}
+
+unsafe fn draw_selection_box(hdc: HDC, row: &RowRender, config: &UiConfig, outline: COLORREF) {
+    let Some(bounds) = scaled_selection_bounds(row.bounds, config.selection_box.relative_size)
+    else {
+        return;
+    };
+    let configured_radius = config
+        .selection_box
+        .corner_radius
+        .unwrap_or(config.window.corner_radius);
+    let radius = clamped_corner_radius(
+        bounds.right - bounds.left,
+        bounds.bottom - bounds.top,
+        configured_radius,
+    );
+    let region = if radius == 0 {
+        unsafe { CreateRectRgn(bounds.left, bounds.top, bounds.right, bounds.bottom) }
+    } else {
+        unsafe {
+            CreateRoundRectRgn(
+                bounds.left,
+                bounds.top,
+                bounds.right,
+                bounds.bottom,
+                radius * 2,
+                radius * 2,
+            )
+        }
+    };
+    if !region.is_invalid() {
+        let brush = unsafe { CreateSolidBrush(outline) };
+        unsafe {
+            let _ = FrameRgn(hdc, region, brush, 1, 1);
+            let _ = DeleteObject(brush);
+            let _ = DeleteObject(region);
+        }
+    }
+}
+
+fn scaled_selection_bounds(bounds: RECT, configured_size: f32) -> Option<RECT> {
+    let scale = if configured_size.is_finite() {
+        configured_size.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    if scale == 0.0 {
+        return None;
+    }
+    let width = (bounds.right - bounds.left).max(1);
+    let height = (bounds.bottom - bounds.top).max(1);
+    let scaled_width = ((width as f32 * scale).round() as i32).max(1);
+    let scaled_height = ((height as f32 * scale).round() as i32).max(1);
+    let left = bounds.left + (width - scaled_width) / 2;
+    let top = bounds.top + (height - scaled_height) / 2;
+    Some(RECT {
+        left,
+        top,
+        right: left + scaled_width,
+        bottom: top + scaled_height,
+    })
+}
+
+unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_radius: i32) {
+    let radius = clamped_corner_radius(width, height, configured_radius);
+    let region = if radius == 0 {
+        unsafe { CreateRectRgn(0, 0, width, height) }
+    } else {
+        unsafe { CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2) }
+    };
+    if !region.is_invalid() {
+        // SetWindowRgn takes ownership of the region on success.
+        if unsafe { SetWindowRgn(hwnd, region, true) } == 0 {
+            unsafe {
+                let _ = DeleteObject(region);
+            }
+        }
+    }
+}
+
+fn clamped_corner_radius(width: i32, height: i32, configured_radius: i32) -> i32 {
+    configured_radius.max(0).min(height / 2).min(width / 2)
 }
 
 // ── Color helpers ─────────────────────────────────────────────────────
@@ -820,9 +999,81 @@ mod tests {
             status: SessionStatus::Composing,
         };
         let cfg = cheime_tip_core::ui_config::CandidateConfig::default();
-        let rows = build_rows(&snap, 22, 18, &cfg);
+        let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
         assert!(rows.len() >= 2, "preedit + at least 1 candidate");
         // First row = preedit, not highlighted
         assert!(!rows[0].highlighted);
+    }
+
+    #[test]
+    fn horizontal_layout_hides_labels_and_limits_candidates() {
+        use cheime_model::{
+            Candidate, CandidateId, DeploymentGeneration, Revision, SessionEpoch, SessionStatus,
+        };
+        let snap = CandidateSnapshot {
+            epoch: SessionEpoch::new(1),
+            revision: Revision::new(1),
+            deployment: DeploymentGeneration::new(1),
+            page: 0,
+            page_size: 10,
+            preedit: "ni".into(),
+            cursor: 2,
+            candidates: (0..3)
+                .map(|index| Candidate {
+                    id: CandidateId::new(index + 1),
+                    text: format!("word{index}"),
+                    annotation: None,
+                    source: "dict".into(),
+                    is_emoji: false,
+                })
+                .collect(),
+            highlighted: Some(CandidateId::new(1)),
+            status: SessionStatus::Composing,
+        };
+        let cfg = cheime_tip_core::ui_config::CandidateConfig {
+            orientation: CandidateOrientation::Horizontal,
+            show_labels: false,
+            page_size: 2,
+            ..Default::default()
+        };
+        let (rows, width, height) = build_rows(&snap, 22, 9, &cfg);
+        let candidates = rows
+            .iter()
+            .filter(|row| row.candidate_index.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].bounds.top, candidates[1].bounds.top);
+        assert!(candidates[1].bounds.left >= candidates[0].bounds.right);
+        assert_eq!(candidates[0].bounds.right - candidates[0].bounds.left, 45);
+        assert!(!String::from_utf16_lossy(&candidates[0].text).contains("1."));
+        assert!(width > 0);
+        assert_eq!(height, 48);
+    }
+
+    #[test]
+    fn corner_radius_is_clamped_to_half_height() {
+        assert_eq!(clamped_corner_radius(300, 40, 100), 20);
+        assert_eq!(clamped_corner_radius(300, 40, -1), 0);
+    }
+
+    #[test]
+    fn selection_box_relative_size_is_centered_and_clamped() {
+        let bounds = RECT {
+            left: 10,
+            top: 20,
+            right: 110,
+            bottom: 60,
+        };
+        assert_eq!(
+            scaled_selection_bounds(bounds, 0.5),
+            Some(RECT {
+                left: 35,
+                top: 30,
+                right: 85,
+                bottom: 50,
+            })
+        );
+        assert_eq!(scaled_selection_bounds(bounds, 0.0), None);
+        assert_eq!(scaled_selection_bounds(bounds, 2.0), Some(bounds));
     }
 }

@@ -66,19 +66,22 @@ Write-Step "Staging guest bundle"
 $bundleDir = Join-Path $StagingRoot "cheime-bundle-$([guid]::NewGuid().ToString('N').Substring(0,8))"
 $binDir    = Join-Path $bundleDir "bin"
 $dataDir   = Join-Path $bundleDir "data\dicts"
+$configDir = Join-Path $bundleDir "config"
 
 # Clean previous stage
 if (Test-Path $bundleDir) { Remove-Item -Recurse -Force $bundleDir }
-New-Item -ItemType Directory -Force -Path $binDir, $dataDir | Out-Null
+New-Item -ItemType Directory -Force -Path $binDir, $dataDir, $configDir | Out-Null
 
 # Copy binaries
 Copy-Item -Force (Join-Path $releaseDir "cheime-engine.exe")          (Join-Path $binDir "cheime-engine.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime_tip.dll")              (Join-Path $binDir "cheime-tip.dll")
 Copy-Item -Force (Join-Path $releaseDir "cheime-registered-probe.exe") (Join-Path $binDir "cheime-registered-probe.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime-profile-probe.exe")    (Join-Path $binDir "cheime-profile-probe.exe")
+Copy-Item -Force (Join-Path $repoRoot "assets\windows\*.ico")          $binDir
 
 # Copy dictionary data
 Copy-Item -Force (Join-Path $repoRoot "data\dicts\*") $dataDir
+Copy-Item -Force (Join-Path $repoRoot "config\ui.yaml") $configDir
 
 # Copy guest scripts
 $sandboxDir = Join-Path $repoRoot "sandbox"
@@ -99,7 +102,13 @@ $stagedFiles = @(
     "bin\cheime-tip.dll",
     "bin\cheime-registered-probe.exe",
     "bin\cheime-profile-probe.exe",
-    "data\dicts\pinyin_small.dict.yaml"
+    "bin\cheime.ico",
+    "bin\zh-black.ico",
+    "bin\zh-white.ico",
+    "bin\en-black.ico",
+    "bin\en-white.ico",
+    "data\dicts\pinyin_small.dict.yaml",
+    "config\ui.yaml"
 )
 foreach ($relPath in $stagedFiles) {
     $fullPath = Join-Path $bundleDir $relPath

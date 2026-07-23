@@ -1,37 +1,29 @@
-# CheIME UI Configuration
-# Completely decoupled from engine schema/profiles.
-# Style: Rime extends chain, deep merge, deny_unknown_fields.
+# CheIME UI settings
+# Edit this file, save it, then switch away from CheIME and back to reload.
 
-extends: []
-
-# ── Window appearance ─────────────────────────────────────────────────
 window:
-  # Windows 10+: opaque always works; acrylic=Win10, mica=Win11 only
-  material: opaque
-  opacity: 1.0
-  padding: [8, 4]
-  caret_offset_x: 0
-  caret_offset_y: 0
-  min_width: 200
+  # Candidate-window height in pixels. 0 = automatic.
+  height: 0
+  # Corner radius in pixels. It is capped at half the actual window height.
+  corner_radius: 3
 
-# ── Candidate list ────────────────────────────────────────────────────
 candidate:
-  font_size: 18
-  # char_width: 12  # unset = auto from font_size
-  line_height: 22
-  row_padding_x: 10
-  row_padding_y: 2
-  page_size: 10
-  label_size: 14
+  # Maximum number of candidate words shown.
+  page_size: 8
+  # horizontal or vertical
+  orientation: horizontal
+  # Show candidate numbers.
+  show_labels: true
 
-# ── Theme colors ──────────────────────────────────────────────────────
+selection_box:
+  # Outline color of the currently selected candidate.
+  outline_color: "#0078d4"
+  # null = inherit window.corner_radius; use 0 for square corners.
+  corner_radius: null
+  # Size relative to the candidate item, from 0.0 to 1.0.
+  relative_size: 1.0
+
 theme:
-  use_system_accent: true
   colors:
+    # Candidate-window background color (#RRGGBB or #RGB).
     background: "#ffffff"
-    foreground: "#000000"
-    candidate_text: "#333333"
-    selected_text: "#ffffff"
-    selected_background: "#0078d4"
-    label_color: "#333333"
-    comment_color: "#888888"

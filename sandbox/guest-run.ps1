@@ -56,6 +56,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $instDir   = Join-Path $env:LOCALAPPDATA "CheIME"
 $binDir    = Join-Path $instDir "bin"
 $dataDir   = Join-Path $instDir "data\dicts"
+$configDir = Join-Path $instDir "config"
 
 $installedDll     = Join-Path $binDir "cheime-tip.dll"
 $registeredProbe  = Join-Path $binDir "cheime-registered-probe.exe"
@@ -132,13 +133,18 @@ try {
         throw "Bundle not found at $scriptDir. The mapped folder should contain bin/, data/, etc."
     }
 
-    New-Item -ItemType Directory -Force -Path $binDir, $dataDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $binDir, $dataDir, $configDir | Out-Null
 
     $toCopy = @(
         "bin\cheime-engine.exe"
         "bin\cheime-tip.dll"
         "bin\cheime-registered-probe.exe"
         "bin\cheime-profile-probe.exe"
+        "bin\cheime.ico"
+        "bin\zh-black.ico"
+        "bin\zh-white.ico"
+        "bin\en-black.ico"
+        "bin\en-white.ico"
     )
     foreach ($rel in $toCopy) {
         $src = Join-Path $scriptDir $rel
@@ -156,6 +162,12 @@ try {
     if (Test-Path $dictSrcDir) {
         Copy-Item -Force (Join-Path $dictSrcDir "*") $dataDir
         Write-Host "  [OK] Dictionary data copied"
+    }
+
+    $uiConfigSource = Join-Path $scriptDir "config\ui.yaml"
+    if (Test-Path -LiteralPath $uiConfigSource -PathType Leaf) {
+        Copy-Item -Force $uiConfigSource (Join-Path $configDir "ui.yaml")
+        Write-Host "  [OK] UI configuration copied"
     }
 
     foreach ($f in @($installedDll, $registeredProbe, $profileProbe, $engineExe)) {

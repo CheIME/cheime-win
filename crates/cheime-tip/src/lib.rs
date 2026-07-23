@@ -12,4 +12,6 @@ pub mod candidate_window;
 pub mod edit_session;
 mod io_thread;
 pub mod key_handler;
+mod language_bar;
 mod pipe_handle;
+mod ui_settings;

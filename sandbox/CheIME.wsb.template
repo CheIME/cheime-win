@@ -4,6 +4,11 @@
       <HostFolder>__BUNDLE_PATH__</HostFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
+    <MappedFolder>
+      <HostFolder>__UI_CONFIG_PATH__</HostFolder>
+      <SandboxFolder>C:\CheIMELiveConfig</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
   </MappedFolders>
   <LogonCommand>
     <Command>C:\Users\WDAGUtilityAccount\Desktop\__BUNDLE_FOLDER__\run.bat</Command>

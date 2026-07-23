@@ -26,6 +26,8 @@ use windows::core::{GUID, HRESULT, Interface, PCWSTR};
 pub const CLSID_CHEIME_TIP: GUID = GUID::from_u128(0xB5F1C9A8_3E7D_4A15_AE2D_F89C1B6E3A07);
 pub const GUID_PROFILE: GUID = GUID::from_u128(0xD7E2A3B4_C5F6_7890_ABCD_EF1234567890);
 pub const GUID_TFCAT_TIP_KEYBOARD: GUID = GUID::from_u128(0x34745C63_B2F0_4784_8B67_5E12C8701A31);
+pub const GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT: GUID =
+    GUID::from_u128(0x25504FB4_7BAB_4BC1_9C69_CF81890F0EF5);
 pub const CLSID_TF_INPUTPROCESSORPROFILES: GUID =
     GUID::from_u128(0x33C53A50_F456_4884_B049_85FD643ECFED);
 pub const CLSID_TF_CATEGORY_MGR: GUID = GUID::from_u128(0xA4B544A1_438D_4B41_9325_869523E2D6C7);
@@ -316,13 +318,16 @@ fn with_profile_manager(
 fn register_profile() -> windows::core::Result<()> {
     with_profile_manager(|manager| {
         let description: Vec<u16> = CHEIME_TIP_NAME.encode_utf16().collect();
+        let icon_path = module_path_from_address(DllRegisterServer as *const c_void)?
+            .with_file_name("cheime.ico");
+        let icon_file: Vec<u16> = icon_path.to_string_lossy().encode_utf16().collect();
         unsafe {
             manager.RegisterProfile(
                 &CLSID_CHEIME_TIP,
                 PROFILE_LANGUAGE_ID,
                 &GUID_PROFILE,
                 &description,
-                &[],
+                &icon_file,
                 0,
                 HKL(std::ptr::null_mut()),
                 0,
@@ -359,6 +364,11 @@ fn register_profile() -> windows::core::Result<()> {
                 &CLSID_CHEIME_TIP,
                 &GUID_TFCAT_TIP_KEYBOARD,
                 &CLSID_CHEIME_TIP,
+            )?;
+            category_mgr.RegisterCategory(
+                &CLSID_CHEIME_TIP,
+                &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+                &CLSID_CHEIME_TIP,
             )
         }
     })
@@ -366,7 +376,19 @@ fn register_profile() -> windows::core::Result<()> {
 
 fn unregister_profile() -> windows::core::Result<()> {
     let result = with_profile_manager(|manager| unsafe {
-        manager.UnregisterProfile(&CLSID_CHEIME_TIP, PROFILE_LANGUAGE_ID, &GUID_PROFILE, 0)
+        manager.UnregisterProfile(&CLSID_CHEIME_TIP, PROFILE_LANGUAGE_ID, &GUID_PROFILE, 0)?;
+        let category_mgr: windows::Win32::UI::TextServices::ITfCategoryMgr =
+            CoCreateInstance(&CLSID_TF_CATEGORY_MGR, None, CLSCTX_INPROC_SERVER)?;
+        category_mgr.UnregisterCategory(
+            &CLSID_CHEIME_TIP,
+            &GUID_TFCAT_TIP_KEYBOARD,
+            &CLSID_CHEIME_TIP,
+        )?;
+        category_mgr.UnregisterCategory(
+            &CLSID_CHEIME_TIP,
+            &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            &CLSID_CHEIME_TIP,
+        )
     });
     match result {
         Ok(()) => Ok(()),

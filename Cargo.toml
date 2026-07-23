@@ -41,6 +41,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 # Windows-specific
 windows = { version = "0.58", features = [
+    "implement",
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Pipes",
@@ -58,3 +59,4 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
 ]}
+windows-core = "0.58"

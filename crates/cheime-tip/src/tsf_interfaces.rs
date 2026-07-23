@@ -9,6 +9,7 @@ use crate::candidate_window::CandidateWindow;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
 use crate::key_handler::{InputMode, KeyAdmission, check_key};
+use crate::language_bar::LanguageBarRegistration;
 use crate::runtime::{
     ActivationResources, ApartmentState, FocusResources, rollback_before_drop, run_before_drop,
 };
@@ -18,6 +19,7 @@ use cheime_tip_core::TipChannel;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -101,7 +103,9 @@ pub struct ComTip {
     channel: RefCell<Option<TipChannel>>,
     io_thread: RefCell<Option<IoThread>>,
     candidate_window: RefCell<Option<CandidateWindow>>,
-    mode: Cell<InputMode>,
+    language_bar: RefCell<Option<LanguageBarRegistration>>,
+    mode: Rc<Cell<InputMode>>,
+    shift_armed: Cell<bool>,
     pub has_composition: Cell<bool>,
 }
 
@@ -125,7 +129,9 @@ impl ComTip {
             channel: RefCell::new(None),
             io_thread: RefCell::new(None),
             candidate_window: RefCell::new(None),
-            mode: Cell::new(InputMode::Chinese),
+            language_bar: RefCell::new(None),
+            mode: Rc::new(Cell::new(InputMode::Chinese)),
+            shift_armed: Cell::new(false),
             has_composition: Cell::new(false),
         })
     }
@@ -149,6 +155,7 @@ impl ComTip {
 
 impl Drop for ComTip {
     fn drop(&mut self) {
+        self.language_bar.get_mut().take();
         if let Some(mut io_thread) = self.io_thread.get_mut().take() {
             io_thread.shutdown();
         }
@@ -318,6 +325,10 @@ unsafe extern "system" fn deactivate(this: *mut c_void) -> HRESULT {
         Some(resources) => resources,
         None => return E_UNEXPECTED,
     };
+    if let Ok(mut language_bar) = unsafe { (*owner).language_bar.try_borrow_mut() } {
+        language_bar.take();
+    }
+    unsafe { (*owner).shift_armed.set(false) };
     // Shutdown I/O thread and hide candidate window
     if let Ok(mut io_opt) = unsafe { (*owner).io_thread.try_borrow_mut() } {
         if let Some(mut io) = io_opt.take() {
@@ -371,6 +382,7 @@ unsafe extern "system" fn activate_ex(
         }
     };
     tsf_log(&format!("[CheIME] ActivateEx client_id={client_id}"));
+    unsafe { (*owner).shift_armed.set(false) };
 
     let manager = unsafe { ITfThreadMgr::from_raw_borrowed(&thread_mgr) }
         .expect("non-null ITfThreadMgr")
@@ -506,6 +518,17 @@ unsafe extern "system" fn activate_ex(
 
     tsf_log("[CheIME] ActivateEx ACCEPTED");
 
+    match LanguageBarRegistration::attach(&manager_for_window, unsafe { (*owner).mode.clone() }) {
+        Ok(registration) => {
+            if let Ok(mut language_bar) = unsafe { (*owner).language_bar.try_borrow_mut() } {
+                *language_bar = Some(registration);
+            }
+        }
+        Err(error) => {
+            tsf_log(&format!("[CheIME] Language bar attach failed: {error}"));
+        }
+    }
+
     // --- I/O and candidate window startup ---
     let mut channel = TipChannel::new(64);
     let receiver = channel.take_receiver();
@@ -559,6 +582,31 @@ static TIP_VTBL: ITfTextInputProcessorEx_Vtbl = ITfTextInputProcessorEx_Vtbl {
 unsafe extern "system" fn key_focus(_: *mut c_void, _: BOOL) -> HRESULT {
     S_OK
 }
+
+fn is_shift_key(key_code: u32) -> bool {
+    matches!(key_code, 0x10 | 0xA0 | 0xA1)
+}
+
+unsafe fn toggle_input_mode(owner: *mut ComTip) {
+    let previous = unsafe { (*owner).mode.get() };
+    unsafe {
+        (*owner).mode.set(match previous {
+            InputMode::Chinese => InputMode::Direct,
+            InputMode::Direct => InputMode::Chinese,
+        });
+        if let Ok(language_bar) = (*owner).language_bar.try_borrow() {
+            if let Some(language_bar) = language_bar.as_ref() {
+                language_bar.refresh();
+            }
+        }
+        (*owner).has_composition.set(false);
+    }
+    tsf_log(&format!(
+        "[CheIME] ToggleMode {:?} -> {:?}",
+        previous,
+        unsafe { (*owner).mode.get() }
+    ));
+}
 /// `OnTestKeyDown` / `OnTestKeyUp` — check whether CheIME handles this key
 /// without producing side effects (no state mutation, no engine messages).
 unsafe extern "system" fn test_key(
@@ -576,6 +624,12 @@ unsafe extern "system" fn test_key(
     let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
     let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
+
+    if is_shift_key(key_code) {
+        unsafe { *eaten = BOOL(0) };
+        return S_OK;
+    }
+
     let ctrl_space = key_code == 0x20 && is_ctrl && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
@@ -603,6 +657,22 @@ unsafe extern "system" fn test_key(
 }
 
 /// `OnKeyDown` — actually process the key (send to engine, toggle mode, etc.).
+unsafe extern "system" fn test_key_up(
+    this: *mut c_void,
+    _: *mut c_void,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+    eaten: *mut BOOL,
+) -> HRESULT {
+    if this.is_null() || eaten.is_null() {
+        return E_POINTER;
+    }
+    let owner = unsafe { owner_from_key(this) };
+    let should_toggle = is_shift_key(wparam.0 as u32) && unsafe { (*owner).shift_armed.get() };
+    unsafe { *eaten = BOOL(should_toggle as i32) };
+    S_OK
+}
+
 unsafe extern "system" fn key_down(
     this: *mut c_void,
     _: *mut c_void,
@@ -618,6 +688,20 @@ unsafe extern "system" fn key_down(
     let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
     let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
+
+    if is_shift_key(key_code) {
+        let activated = ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
+            state.key_admission_enabled()
+        })
+        .unwrap_or(false);
+        unsafe {
+            (*owner).shift_armed.set(activated && !is_ctrl && !is_alt);
+            *eaten = BOOL(0);
+        }
+        return S_OK;
+    }
+    unsafe { (*owner).shift_armed.set(false) };
+
     let ctrl_space = key_code == 0x20 && is_ctrl && !is_alt && !is_shift;
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
@@ -780,20 +864,7 @@ unsafe extern "system" fn key_down(
             S_OK
         }
         KeyAdmission::ToggleMode => {
-            unsafe {
-                let prev = (*owner).mode.get();
-                (*owner).mode.set(match prev {
-                    InputMode::Chinese => InputMode::Direct,
-                    InputMode::Direct => InputMode::Chinese,
-                });
-                // Reset composition tracking on toggle so empty backspace passes through
-                (*owner).has_composition.set(false);
-                tsf_log(&format!(
-                    "[CheIME] ToggleMode {:?} → {:?}",
-                    prev,
-                    (*owner).mode.get()
-                ));
-            };
+            unsafe { toggle_input_mode(owner) };
             unsafe { *eaten = BOOL(1) };
             S_OK
         }
@@ -806,14 +877,20 @@ unsafe extern "system" fn key_down(
 
 /// `OnKeyUp` — always pass through (we already handled the key on `OnKeyDown`).
 unsafe extern "system" fn key_up(
-    _this: *mut c_void,
+    this: *mut c_void,
     _: *mut c_void,
-    _wparam: WPARAM,
+    wparam: WPARAM,
     _lparam: LPARAM,
     eaten: *mut BOOL,
 ) -> HRESULT {
-    if eaten.is_null() {
+    if this.is_null() || eaten.is_null() {
         return E_POINTER;
+    }
+    let owner = unsafe { owner_from_key(this) };
+    if is_shift_key(wparam.0 as u32) && unsafe { (*owner).shift_armed.replace(false) } {
+        unsafe { toggle_input_mode(owner) };
+        unsafe { *eaten = BOOL(1) };
+        return S_OK;
     }
     unsafe { *eaten = BOOL(0) };
     S_OK
@@ -860,7 +937,7 @@ static KEY_VTBL: ITfKeyEventSink_Vtbl = ITfKeyEventSink_Vtbl {
     base__: unknown_vtbl(key_qi, key_add_ref, key_release),
     OnSetFocus: key_focus,
     OnTestKeyDown: test_key,
-    OnTestKeyUp: test_key,
+    OnTestKeyUp: test_key_up,
     OnKeyDown: key_down,
     OnKeyUp: key_up,
     OnPreservedKey: preserved_key,
@@ -1349,6 +1426,44 @@ mod tests {
             S_OK
         );
         assert_eq!(eaten, BOOL(0));
+        assert_eq!(unsafe { release(key) }, 0);
+    }
+
+    #[test]
+    fn shift_release_toggles_mode_when_armed() {
+        let _guard = test_counter_guard();
+        let owner = Box::into_raw(ComTip::new());
+        unsafe { (*owner).shift_armed.set(true) };
+        let key = unsafe { ComTip::interface(owner, &IID_KEY).unwrap() };
+        let mut eaten = BOOL(0);
+        assert_eq!(
+            unsafe { key_up(key, null_mut(), WPARAM(0x10), LPARAM(0), &mut eaten) },
+            S_OK
+        );
+        assert_eq!(eaten, BOOL(1));
+        assert_eq!(unsafe { (*owner).mode.get() }, InputMode::Direct);
+        assert!(!unsafe { (*owner).shift_armed.get() });
+        assert_eq!(unsafe { release(key) }, 0);
+    }
+
+    #[test]
+    fn another_key_cancels_armed_shift_toggle() {
+        let _guard = test_counter_guard();
+        let owner = Box::into_raw(ComTip::new());
+        unsafe { (*owner).shift_armed.set(true) };
+        let key = unsafe { ComTip::interface(owner, &IID_KEY).unwrap() };
+        let mut eaten = BOOL(1);
+        assert_eq!(
+            unsafe { key_down(key, null_mut(), WPARAM(0x41), LPARAM(0), &mut eaten) },
+            S_OK
+        );
+        assert!(!unsafe { (*owner).shift_armed.get() });
+        assert_eq!(
+            unsafe { key_up(key, null_mut(), WPARAM(0x10), LPARAM(0), &mut eaten) },
+            S_OK
+        );
+        assert_eq!(eaten, BOOL(0));
+        assert_eq!(unsafe { (*owner).mode.get() }, InputMode::Chinese);
         assert_eq!(unsafe { release(key) }, 0);
     }
 

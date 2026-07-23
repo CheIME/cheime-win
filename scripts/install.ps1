@@ -34,7 +34,12 @@ New-Item -ItemType Directory -Force -Path $binDir, $dataDir, $configDir | Out-Nu
 Copy-Item -Force $engineSource $binDir
 $dllPath = Join-Path $binDir "cheime-tip.dll"
 Copy-Item -Force $dllSource $dllPath
+Copy-Item -Force (Join-Path $projectRoot "assets\windows\*.ico") $binDir
 Copy-Item -Force (Join-Path $projectRoot "data\dicts\*") $dataDir
+$uiConfig = Join-Path $configDir "ui.yaml"
+if (-not (Test-Path -LiteralPath $uiConfig -PathType Leaf)) {
+    Copy-Item -Force (Join-Path $projectRoot "config\ui.yaml") $uiConfig
+}
 
 Write-Host "  Registering TIP DLL..." -ForegroundColor Yellow
 $proc = Start-Process -FilePath "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList @('/s', $dllPath) -Wait -PassThru -NoNewWindow

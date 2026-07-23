@@ -17,6 +17,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $buildScript = Join-Path $repoRoot "scripts\build.ps1"
 $template = Join-Path $repoRoot "sandbox\CheIME.wsb.template"
+$uiConfigDir = Join-Path $repoRoot "config"
 
 # 1. Build & stage
 if (-not $SkipBuild) {
@@ -43,13 +44,17 @@ if (-not (Test-Path $template)) {
     Write-Error "WSB template not found: $template"
     exit 1
 }
-$wsbContent = (Get-Content $template -Raw) -replace '__BUNDLE_PATH__', $bundleDir -replace '__BUNDLE_FOLDER__', $bundleName
+$wsbContent = (Get-Content $template -Raw) `
+    -replace '__BUNDLE_PATH__', $bundleDir `
+    -replace '__BUNDLE_FOLDER__', $bundleName `
+    -replace '__UI_CONFIG_PATH__', $uiConfigDir
 
 $wsbFile = Join-Path $stagingRoot "CheIME.wsb"
 Set-Content -Path $wsbFile -Value $wsbContent -NoNewline -Encoding utf8
 
 Write-Host "`n=== Generated WSB config ===" -ForegroundColor Cyan
 Write-Host "  Bundle: $bundleDir"
+Write-Host "  Live UI config: $uiConfigDir\ui.yaml"
 Write-Host "  WSB:    $wsbFile"
 Write-Host "`nCleaning up old sandbox instances..." -ForegroundColor Yellow
 
