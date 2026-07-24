@@ -198,7 +198,9 @@ dependencies = [
  "cheime-model",
  "cheime-pipeline",
  "cheime-protocol",
+ "cheime-user-data",
  "criterion",
+ "parking_lot",
  "thiserror",
 ]
 
@@ -229,7 +231,9 @@ name = "cheime-tip-core"
 version = "0.1.0"
 dependencies = [
  "cheime-model",
+ "cheime-pipeline",
  "cheime-protocol",
+ "cheime-session",
  "cheime-wire",
  "serde",
  "serde_yaml",

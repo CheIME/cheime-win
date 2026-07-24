@@ -13,3 +13,11 @@ cheime-wire.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+cheime-pipeline.workspace = true
+cheime-session.workspace = true
+
+[[test]]
+name = "fake_ime_roundtrip"
+path = "../../tests/integration/fake_ime_roundtrip.rs"

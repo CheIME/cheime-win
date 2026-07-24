@@ -10,6 +10,7 @@ mod session_runner;
 
 use cheime_config::schema::SchemaConfig;
 use cheime_dictionary::{CompiledIndex, DictCache, DictColumn};
+use cheime_pipeline::learning::LearningService;
 use cheime_user_data::UserStore;
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -79,9 +80,10 @@ fn main() {
     let user_store =
         UserStore::open("engine-host", &db_path).unwrap_or_else(|_| UserStore::new("engine-host"));
     let store = Arc::new(Mutex::new(user_store));
+    let learning = Arc::new(LearningService::production(store));
 
     eprintln!("Starting named pipe server...");
-    if let Err(e) = server::run_server(&config, index, store, &pipe_name) {
+    if let Err(e) = server::run_server(&config, index, learning, &pipe_name) {
         eprintln!("Server error: {e}");
     }
 }

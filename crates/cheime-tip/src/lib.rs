@@ -14,4 +14,5 @@ mod io_thread;
 pub mod key_handler;
 mod language_bar;
 mod pipe_handle;
+pub mod rollback_guard;
 mod ui_settings;

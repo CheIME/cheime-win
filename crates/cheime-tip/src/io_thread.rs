@@ -28,6 +28,11 @@ pub const WM_CHEIME_SNAPSHOT: u32 = WM_USER + 100;
 pub const WM_CHEIME_ACTION: u32 = WM_USER + 101;
 pub const WM_CHEIME_STATUS: u32 = WM_USER + 102;
 
+pub(crate) struct PostedAction {
+    pub action: PlatformAction,
+    pub token: cheime_model::CommitToken,
+}
+
 pub struct IoThread {
     handle: Option<JoinHandle<()>>,
     stop_flag: Arc<AtomicBool>,
@@ -78,6 +83,33 @@ fn next_client_instance_id() -> u64 {
     (process << 32 | counter).max(1)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconnectReason {
+    WriteError,
+    IdentityError,
+    EngineDisconnected,
+    ReadError,
+}
+
+impl ReconnectReason {
+    fn status(self) -> (bool, &'static str) {
+        let detail = match self {
+            Self::WriteError => "write error",
+            Self::IdentityError => "engine identity error",
+            Self::EngineDisconnected => "engine disconnected",
+            Self::ReadError => "read error",
+        };
+        (false, detail)
+    }
+
+    fn retry_delay(self) -> std::time::Duration {
+        match self {
+            Self::EngineDisconnected => std::time::Duration::from_millis(100),
+            _ => std::time::Duration::ZERO,
+        }
+    }
+}
+
 fn io_thread_main(
     receiver: Receiver<FrontendMessage>,
     hwnd: HWND,
@@ -118,7 +150,7 @@ fn io_thread_main(
         };
 
         // 3. Message loop
-        loop {
+        let reconnect_reason = 'connected: loop {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -127,8 +159,7 @@ fn io_thread_main(
             while let Ok(msg) = receiver.try_recv() {
                 let msg = session.prepare(msg);
                 if writer.write_message(&codec, &msg).is_err() {
-                    post_status(hwnd, false, "write error");
-                    continue 'reconnect;
+                    break 'connected ReconnectReason::WriteError;
                 }
             }
             let _ = writer.flush();
@@ -145,7 +176,7 @@ fn io_thread_main(
                         }
                         Err(e) => {
                             tsf_log(&format!("[CheIME] IO: identity error: {e}, reconnecting"));
-                            continue 'reconnect;
+                            break 'connected ReconnectReason::IdentityError;
                         }
                     }
                     match msg {
@@ -157,22 +188,33 @@ fn io_thread_main(
                             ));
                             post_snapshot(hwnd, &snapshot);
                         }
-                        EngineMessage::PlatformAction { action, .. } => {
+                        EngineMessage::PlatformAction { header, action } => {
                             tsf_log(&format!("[CheIME] IO action={action:?}"));
-                            post_action(hwnd, &action);
+                            post_action(
+                                hwnd,
+                                PostedAction {
+                                    token: cheime_model::CommitToken {
+                                        session: header.session,
+                                        epoch: header.epoch,
+                                        action_id: action.id,
+                                    },
+                                    action,
+                                },
+                            );
                         }
                         _ => {}
                     }
                 }
                 Err(PipeError::TimedOut) => {}
                 Ok(None) | Err(PipeError::Disconnected) => {
-                    post_status(hwnd, false, "engine disconnected");
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    continue 'reconnect;
+                    break 'connected ReconnectReason::EngineDisconnected;
                 }
-                Err(_) => continue 'reconnect,
+                Err(_) => break 'connected ReconnectReason::ReadError,
             }
-        }
+        };
+        let (connected, detail) = reconnect_reason.status();
+        post_status(hwnd, connected, detail);
+        std::thread::sleep(reconnect_reason.retry_delay());
     }
 }
 
@@ -363,6 +405,9 @@ impl FrontendSession {
             FrontendMessage::PlatformActionResult { result, .. } => {
                 FrontendMessage::PlatformActionResult { header, result }
             }
+            FrontendMessage::RollbackLearning { token, .. } => {
+                FrontendMessage::RollbackLearning { header, token }
+            }
         }
     }
 }
@@ -445,8 +490,8 @@ fn post_snapshot(hwnd: HWND, snapshot: &CandidateSnapshot) {
     }
 }
 
-fn post_action(hwnd: HWND, action: &PlatformAction) {
-    let b = Box::new(action.clone());
+fn post_action(hwnd: HWND, action: PostedAction) {
+    let b = Box::new(action);
     let ptr = Box::into_raw(b) as isize;
     unsafe {
         if PostMessageW(
@@ -457,7 +502,7 @@ fn post_action(hwnd: HWND, action: &PlatformAction) {
         )
         .is_err()
         {
-            drop(Box::from_raw(ptr as *mut PlatformAction));
+            drop(Box::from_raw(ptr as *mut PostedAction));
         }
     }
 }
@@ -527,6 +572,21 @@ mod phase2_tests {
     }
 
     #[test]
+    fn every_connected_reconnect_reason_publishes_a_disconnected_status() {
+        let reasons = [
+            ReconnectReason::WriteError,
+            ReconnectReason::IdentityError,
+            ReconnectReason::EngineDisconnected,
+            ReconnectReason::ReadError,
+        ];
+
+        for reason in reasons {
+            assert!(!reason.status().0);
+            assert!(!reason.status().1.is_empty());
+        }
+    }
+
+    #[test]
     fn frontend_session_rewrites_outbound_header_with_acknowledged_state() {
         let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
         let mut session = FrontendSession::new(state);
@@ -583,6 +643,37 @@ mod phase2_tests {
                 .observe_engine(&EngineMessage::SessionOpened { header: wrong })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn frontend_session_preserves_rollback_token_identity() {
+        let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
+        let mut session = FrontendSession::new(state);
+        let input = FrontendMessage::RollbackLearning {
+            header: cheime_protocol::MessageHeader {
+                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                client: ClientInstanceId::new(1),
+                session: SessionId::new(1),
+                epoch: SessionEpoch::new(1),
+                sequence: cheime_model::Sequence::new(0),
+                revision: Revision::new(0),
+                deployment: DeploymentGeneration::new(1),
+            },
+            token: cheime_model::CommitToken {
+                session: SessionId::new(1),
+                epoch: SessionEpoch::new(1),
+                action_id: cheime_model::ActionId::new(55),
+            },
+        };
+
+        let FrontendMessage::RollbackLearning { header, token } = session.prepare(input) else {
+            panic!("expected rollback message");
+        };
+        assert_eq!(header.session, SessionId::new(7));
+        assert_eq!(header.epoch, SessionEpoch::new(8));
+        assert_eq!(token.session, SessionId::new(1));
+        assert_eq!(token.epoch, SessionEpoch::new(1));
+        assert_eq!(token.action_id, cheime_model::ActionId::new(55));
     }
 
     #[test]

@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,6 +54,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.85"
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:

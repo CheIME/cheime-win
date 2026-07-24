@@ -4,9 +4,10 @@
 //! The config is loaded by the TIP at startup and stored in `WindowContext`.
 
 use crate::edit_session::request_edit_session;
-use crate::io_thread::{WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
+use crate::io_thread::{PostedAction, WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
+use crate::rollback_guard::{GuardEvent, RollbackGuard};
 use crate::tsf_interfaces::{ComTip, tsf_log};
-use cheime_model::{CandidateSnapshot, PlatformAction};
+use cheime_model::CandidateSnapshot;
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::ui_config::{CandidateOrientation, UiConfig};
 use std::cell::Cell;
@@ -21,13 +22,11 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen, CreateFontW, CreateRectRgn,
     CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint,
-    FF_DONTCARE, FW_NORMAL, FillRect, FrameRgn, GetSysColor, HBRUSH, HDC, HFONT,
-    InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow,
-    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
+    FF_DONTCARE, FW_NORMAL, FillRect, FrameRgn, GetSysColor, HBRUSH, HDC, HFONT, InvalidateRect,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject,
+    SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
     TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
@@ -36,12 +35,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetWindowLongPtrW, HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE,
-    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSELEAVE, WM_MOUSEMOVE, WM_PAINT,
-    WNDCLASS_STYLES, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
 const CANDIDATE_WINDOW_CLASS: &str = "CheIME_CandidateWindow";
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 // ── COM constants (local copies to avoid coupling) ────────────────────
 const S_OK: HRESULT = HRESULT(0);
@@ -70,6 +70,8 @@ pub struct WindowContext {
     pub client_id: u32,
     pub channel: SyncSender<FrontendMessage>,
     pub composition: Mutex<Option<ITfComposition>>,
+    pub rollback_guard: Mutex<RollbackGuard>,
+    pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
     pub tip: *mut ComTip,
     /// UI configuration (never modified after window creation; safe shared ref).
     pub config: UiConfig,
@@ -201,10 +203,29 @@ impl CandidateWindow {
             client_id,
             channel,
             composition: Mutex::new(None),
+            rollback_guard: Mutex::new(RollbackGuard::default()),
+            rollback_anchor: Mutex::new(None),
             tip,
             cached_font,
             config,
         })
+    }
+}
+
+impl WindowContext {
+    pub fn has_rollback_guard(&self) -> bool {
+        self.rollback_guard
+            .lock()
+            .is_ok_and(|guard| guard.is_armed())
+    }
+
+    pub fn disarm_rollback(&self, event: GuardEvent) {
+        if let Ok(mut guard) = self.rollback_guard.lock() {
+            guard.observe(event);
+        }
+        if let Ok(mut anchor) = self.rollback_anchor.lock() {
+            anchor.take();
+        }
     }
 }
 
@@ -289,6 +310,9 @@ unsafe extern "system" fn candidate_window_proc(
                     status.0, status.1
                 ));
                 if !status.0 {
+                    if let Some(ctx) = ctx() {
+                        ctx.disarm_rollback(GuardEvent::FocusChanged);
+                    }
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_HIDE);
                     }
@@ -519,19 +543,29 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
 fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     if lparam.0 != 0 {
-        let action: Box<PlatformAction> = unsafe { Box::from_raw(lparam.0 as *mut PlatformAction) };
-        tsf_log(&format!("[CheIME] WM_ACTION action={action:?}"));
+        let posted: Box<PostedAction> = unsafe { Box::from_raw(lparam.0 as *mut PostedAction) };
+        tsf_log(&format!("[CheIME] WM_ACTION action={:?}", posted.action));
         match unsafe { ctx.thread_mgr.GetFocus() } {
             Ok(doc) => match unsafe { doc.GetTop() } {
                 Ok(context) => {
                     tsf_log("[CheIME] WM_ACTION: requesting edit session");
+                    if !ctx.tip.is_null() {
+                        unsafe { (*ctx.tip).suppress_text_edit_notifications(true) };
+                    }
                     request_edit_session(
                         ctx.client_id,
                         &context,
-                        *action,
+                        posted.action,
+                        posted.token,
                         &ctx.channel as *const SyncSender<FrontendMessage>,
                         &ctx.composition as *const Mutex<Option<ITfComposition>>,
+                        &ctx.rollback_guard as *const Mutex<RollbackGuard>,
+                        &ctx.rollback_anchor
+                            as *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
                     );
+                    if !ctx.tip.is_null() {
+                        unsafe { (*ctx.tip).suppress_text_edit_notifications(false) };
+                    }
                 }
                 Err(e) => tsf_log(&format!("[CheIME] WM_ACTION: GetTop failed: {e:?}")),
             },
@@ -578,6 +612,72 @@ fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
                         },
                     });
                 }
+            }
+        }
+    }
+    LRESULT(0)
+}
+
+fn handle_mouse_move(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
+    let Some(ctx) = ctx else { return LRESULT(0) };
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = TrackMouseEvent(&mut track);
+    }
+
+    let x = (lparam.0 as u16) as i32;
+    let y = ((lparam.0 >> 16) as u16) as i32;
+    if let Ok(mut guard) = ctx.snapshot.lock() {
+        if let Some((snapshot, rows)) = guard.as_mut() {
+            let hovered = rows.iter().find_map(|row| {
+                let hit = x >= row.bounds.left
+                    && x < row.bounds.right
+                    && y >= row.bounds.top
+                    && y < row.bounds.bottom;
+                hit.then_some(row.candidate_index).flatten()
+            });
+            let highlighted =
+                hovered.and_then(|index| snapshot.candidates.get(index).map(|c| c.id));
+            let changed = rows.iter().any(|row| {
+                row.highlighted
+                    != row
+                        .candidate_index
+                        .and_then(|index| snapshot.candidates.get(index))
+                        .is_some_and(|candidate| Some(candidate.id) == highlighted)
+            });
+            for row in rows {
+                row.highlighted = row
+                    .candidate_index
+                    .and_then(|index| snapshot.candidates.get(index))
+                    .is_some_and(|candidate| Some(candidate.id) == highlighted);
+            }
+            if changed {
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
+            }
+        }
+    }
+    LRESULT(0)
+}
+
+fn handle_mouse_leave(hwnd: HWND, ctx: Option<&WindowContext>) -> LRESULT {
+    let Some(ctx) = ctx else { return LRESULT(0) };
+    if let Ok(mut guard) = ctx.snapshot.lock() {
+        if let Some((snapshot, rows)) = guard.as_mut() {
+            for row in rows {
+                row.highlighted = row
+                    .candidate_index
+                    .and_then(|index| snapshot.candidates.get(index))
+                    .is_some_and(|candidate| Some(candidate.id) == snapshot.highlighted);
+            }
+            unsafe {
+                let _ = InvalidateRect(hwnd, None, false);
             }
         }
     }

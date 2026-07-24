@@ -25,6 +25,10 @@ pub enum KeyAdmission {
     ToggleMode,
 }
 
+pub fn is_guarded_backspace(key_code: u32, has_rollback_guard: bool) -> bool {
+    key_code == 0x08 && has_rollback_guard
+}
+
 /// Check whether CheIME should handle a key, given the current mode
 /// and whether CheIME is activated.
 ///
@@ -37,6 +41,29 @@ pub fn check_key(
     is_ctrl: bool,
     is_alt: bool,
     has_composition: bool,
+) -> KeyAdmission {
+    check_key_with_guard(
+        mode,
+        cheime_activated,
+        key_code,
+        is_shift,
+        is_ctrl,
+        is_alt,
+        has_composition,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn check_key_with_guard(
+    mode: InputMode,
+    cheime_activated: bool,
+    key_code: u32,
+    is_shift: bool,
+    is_ctrl: bool,
+    is_alt: bool,
+    has_composition: bool,
+    has_rollback_guard: bool,
 ) -> KeyAdmission {
     if !cheime_activated {
         // CheIME not active: only mode-toggle shortcut is accepted
@@ -59,9 +86,14 @@ pub fn check_key(
             }
             KeyAdmission::PassThrough
         }
-        InputMode::Chinese => {
-            chinese_mode_keys(key_code, is_shift, is_ctrl, is_alt, has_composition)
-        }
+        InputMode::Chinese => chinese_mode_keys(
+            key_code,
+            is_shift,
+            is_ctrl,
+            is_alt,
+            has_composition,
+            has_rollback_guard,
+        ),
     }
 }
 
@@ -72,6 +104,7 @@ fn chinese_mode_keys(
     is_ctrl: bool,
     is_alt: bool,
     has_composition: bool,
+    has_rollback_guard: bool,
 ) -> KeyAdmission {
     // Ctrl+Space / Shift+Space: toggle mode
     // Must check Shift+Space first (Ctrl key may also be reported as pressed
@@ -99,9 +132,18 @@ fn chinese_mode_keys(
             KeyAdmission::Handled
         }
 
+        // Apostrophe separates ambiguous Pinyin syllables (e.g. xi'an).
+        0xDE => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
+
         // Backspace: only handled when there is composition text
         0x08 => {
-            if has_composition {
+            if has_composition || has_rollback_guard {
                 KeyAdmission::Handled
             } else {
                 KeyAdmission::PassThrough
@@ -182,6 +224,70 @@ mod tests {
     const VK_Z: u32 = 0x5A;
     const VK_0: u32 = 0x30;
     const VK_9: u32 = 0x39;
+    const VK_OEM_7: u32 = 0xDE;
+
+    #[test]
+    fn backspace_is_admitted_for_rollback_without_active_composition() {
+        assert_eq!(
+            check_key_with_guard(
+                InputMode::Chinese,
+                true,
+                VK_BACK,
+                false,
+                false,
+                false,
+                false,
+                true,
+            ),
+            KeyAdmission::Handled
+        );
+    }
+
+    #[test]
+    fn guarded_backspace_precedes_stale_composition_state() {
+        assert!(is_guarded_backspace(VK_BACK, true));
+        assert_eq!(
+            check_key_with_guard(
+                InputMode::Chinese,
+                true,
+                VK_BACK,
+                false,
+                false,
+                false,
+                true,
+                true,
+            ),
+            KeyAdmission::Handled
+        );
+    }
+
+    #[test]
+    fn apostrophe_is_handled_only_inside_composition() {
+        assert_eq!(
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_OEM_7,
+                false,
+                false,
+                false,
+                true,
+            ),
+            KeyAdmission::Handled
+        );
+        assert_eq!(
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_OEM_7,
+                false,
+                false,
+                false,
+                false,
+            ),
+            KeyAdmission::PassThrough
+        );
+    }
 
     #[test]
     fn not_activated_passes_through_most_keys() {

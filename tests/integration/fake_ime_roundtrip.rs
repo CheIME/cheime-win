@@ -9,8 +9,8 @@
 //! Does not require actual Windows named pipes — uses `Cursor<Vec<u8>>`.
 
 use cheime_model::{
-    CORE_PROTOCOL_VERSION, ClientInstanceId, DeploymentGeneration, Key, KeyEvent, KeyState,
-    PlatformActionKind, Revision, Sequence, SessionEpoch, SessionId,
+    ActionId, CORE_PROTOCOL_VERSION, ClientInstanceId, CommitToken, DeploymentGeneration, Key,
+    KeyEvent, KeyState, PlatformActionKind, Revision, Sequence, SessionEpoch, SessionId,
 };
 use cheime_pipeline::BuiltinPipeline;
 use cheime_protocol::{EngineMessage, FrontendMessage, MessageHeader};
@@ -67,7 +67,7 @@ fn single_key_roundtrip_and_response() {
     writer.write_message(&c, &key_msg).unwrap();
     writer.flush().unwrap();
 
-    let written = writer.inner.into_inner();
+    let written = writer.into_inner().into_inner();
     assert!(!written.is_empty(), "should have written bytes");
 
     // 3. Read it back
@@ -99,7 +99,7 @@ fn key_command_produces_expected_session_response() {
     let cursor = Cursor::new(buffer);
     let mut writer = PipeWriter::new(cursor);
     writer.write_message(&c, &key_msg).unwrap();
-    let written = writer.inner.into_inner();
+    let written = writer.into_inner().into_inner();
 
     let read_cursor = Cursor::new(written);
     let mut reader = PipeReader::new(read_cursor);
@@ -116,12 +116,12 @@ fn key_command_produces_expected_session_response() {
         "expected at least PlatformAction + CandidateSnapshot"
     );
 
-    let has_action = responses.iter().any(|m| {
-        matches!(m, EngineMessage::PlatformAction { .. })
-    });
-    let has_snapshot = responses.iter().any(|m| {
-        matches!(m, EngineMessage::CandidateSnapshot { .. })
-    });
+    let has_action = responses
+        .iter()
+        .any(|m| matches!(m, EngineMessage::PlatformAction { .. }));
+    let has_snapshot = responses
+        .iter()
+        .any(|m| matches!(m, EngineMessage::CandidateSnapshot { .. }));
 
     assert!(has_action, "missing PlatformAction");
     assert!(has_snapshot, "missing CandidateSnapshot");
@@ -142,9 +142,12 @@ fn engine_message_roundtrip_through_codec() {
             text: String::from("你"),
             annotation: Some(String::from("nǐ")),
             source: String::from("builtin"),
+            is_emoji: false,
         }],
         highlighted: Some(cheime_model::CandidateId::new(1)),
         status: cheime_model::SessionStatus::Composing,
+        page: 0,
+        page_size: 9,
     };
     let msg = EngineMessage::CandidateSnapshot {
         header: test_identity(),
@@ -245,4 +248,25 @@ fn unknown_action_rejected() {
         },
     });
     assert!(result.is_err());
+}
+
+#[test]
+fn rollback_learning_roundtrips_through_tip_pipe_codec() {
+    let message = FrontendMessage::RollbackLearning {
+        header: MessageHeader {
+            sequence: Sequence::new(9),
+            revision: Revision::new(4),
+            ..test_identity()
+        },
+        token: CommitToken {
+            session: SessionId::new(1),
+            epoch: SessionEpoch::new(1),
+            action_id: ActionId::new(7),
+        },
+    };
+    let mut writer = PipeWriter::new(Cursor::new(Vec::new()));
+    writer.write_message(&codec(), &message).unwrap();
+    let mut reader = PipeReader::new(Cursor::new(writer.into_inner().into_inner()));
+    let decoded: Option<FrontendMessage> = reader.try_read_frame(&codec()).unwrap();
+    assert_eq!(decoded, Some(message));
 }

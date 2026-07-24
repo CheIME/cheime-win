@@ -36,6 +36,10 @@ impl<W: Write + Send> PipeWriter<W> {
     pub fn flush(&mut self) -> Result<(), PipeError> {
         self.inner.flush().map_err(|e| PipeError::Io(e.to_string()))
     }
+
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
 }
 
 /// Reads length-prefixed framed messages through a codec.
