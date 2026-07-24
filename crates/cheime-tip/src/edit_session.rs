@@ -6,7 +6,8 @@
 //! a `WM_CHEIME_ACTION` message.
 
 use cheime_model::{
-    PlatformAction, PlatformActionKind, PlatformActionOutcome, PlatformActionResult,
+    CommitToken, PlatformAction, PlatformActionKind, PlatformActionOutcome, PlatformActionResult,
+    SessionId,
 };
 use cheime_protocol::FrontendMessage;
 use std::ffi::c_void;
@@ -17,11 +18,12 @@ use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
-    ITfEditSession_Vtbl, TF_ANCHOR_END, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_DEFAULT_SELECTION,
-    TF_ES_READWRITE, TF_ES_SYNC, TF_SELECTION,
+    ITfEditSession_Vtbl, TF_ANCHOR_END, TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS,
+    TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC, TF_SELECTION,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
+use crate::rollback_guard::{RollbackGuard, monotonic_ms};
 // Re-export tsf_log from parent module for use in edit session tracing.
 use crate::tsf_interfaces::tsf_log;
 
@@ -34,13 +36,16 @@ pub const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
 /// Data that the `DoEditSession` callback processes.
 struct EditSessionData {
     context: ITfContext,
-    action: PlatformAction,
+    action: Option<PlatformAction>,
+    guarded_backspace: bool,
     /// Raw pointer to a `SyncSender<FrontendMessage>` stored in `WindowContext`.
     /// Safe because the channel outlives all queued edit sessions.
     channel: *const SyncSender<FrontendMessage>,
     /// Raw pointer to the `Mutex<Option<ITfComposition>>` in `WindowContext`.
     /// Safe because the composition mutex outlives all queued edit sessions.
     composition: *const Mutex<Option<ITfComposition>>,
+    guard: *const Mutex<RollbackGuard>,
+    anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
 }
 
 // ── COM callback object ─────────────────────────────────────────────────────
@@ -148,7 +153,13 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
         Some(d) => d,
         None => return S_OK,
     };
-    match &data.action.kind {
+    if data.guarded_backspace {
+        return handle_guarded_backspace(ec, &data.context, data.channel, data.guard, data.anchor);
+    }
+    let Some(action) = data.action.as_ref() else {
+        return S_OK;
+    };
+    match &action.kind {
         PlatformActionKind::Commit { text } => {
             tsf_log(&format!("[CheIME] edit: Commit text={text:?}"));
             handle_commit(
@@ -157,7 +168,9 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
                 text,
                 data.channel,
                 data.composition,
-                &data.action,
+                action,
+                data.guard,
+                data.anchor,
             )
         }
         PlatformActionKind::SetPreedit { text, cursor } => {
@@ -171,12 +184,12 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
                 *cursor,
                 data.channel,
                 data.composition,
-                &data.action,
+                action,
             )
         }
         PlatformActionKind::CancelComposition => {
             tsf_log("[CheIME] edit: CancelComposition");
-            handle_cancel_composition(ec, data.composition, data.channel, &data.action)
+            handle_cancel_composition(ec, data.composition, data.channel, action)
         }
     }
 }
@@ -202,6 +215,8 @@ fn handle_commit(
     channel_ptr: *const SyncSender<FrontendMessage>,
     composition_ptr: *const Mutex<Option<ITfComposition>>,
     action: &PlatformAction,
+    guard_ptr: *const Mutex<RollbackGuard>,
+    anchor_ptr: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
 ) -> HRESULT {
     tsf_log(&format!(
         "[CheIME] handle_commit START text={text:?} ec={ec}"
@@ -210,13 +225,15 @@ fn handle_commit(
     // The ITfComposition from StartComposition may not survive across edit sessions
     // when no sink is provided, so we avoid relying on it for commit.
     let result = commit_at_selection(ec, context, text);
-    if result.is_ok() {
+    if let Ok(anchor) = result.as_ref() {
         // Clean up composition state regardless
         let _ = end_active_composition(ec, composition_ptr);
+        arm_rollback_guard(context, action, anchor, guard_ptr, anchor_ptr);
         tsf_log("[CheIME] handle_commit SUCCESS");
     }
     tsf_log(&format!("[CheIME] handle_commit RESULT: {result:?}"));
-    send_result(action, channel_ptr, &result);
+    let outcome = result.map(|_| ());
+    send_result(action, channel_ptr, &outcome);
     S_OK
 }
 
@@ -363,7 +380,11 @@ fn handle_cancel_composition(
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Commit text at the current selection point without an active composition.
-fn commit_at_selection(ec: u32, context: &ITfContext, text: &str) -> Result<(), String> {
+fn commit_at_selection(
+    ec: u32,
+    context: &ITfContext,
+    text: &str,
+) -> Result<windows::Win32::UI::TextServices::ITfRange, String> {
     let mut selection = [zeroed_selection()];
     let mut fetched = 0u32;
     if unsafe { context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched) }
@@ -396,8 +417,127 @@ fn commit_at_selection(ec: u32, context: &ITfContext, text: &str) -> Result<(), 
     }
     // Update the context selection so the cursor moves to end of committed text.
     let _ = unsafe { context.SetSelection(ec, &selection) };
+    let anchor = unsafe { sel_range.Clone() }.map_err(|e| format!("Clone anchor: {e}"));
     release_selection_range(selection);
-    Ok(())
+    anchor
+}
+
+fn context_identity(context: &ITfContext) -> Option<usize> {
+    context
+        .cast::<IUnknown>()
+        .ok()
+        .map(|unknown| unknown.as_raw() as usize)
+}
+
+fn arm_rollback_guard(
+    context: &ITfContext,
+    action: &PlatformAction,
+    anchor: &windows::Win32::UI::TextServices::ITfRange,
+    guard_ptr: *const Mutex<RollbackGuard>,
+    anchor_ptr: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+) {
+    let Some(identity) = context_identity(context) else {
+        return;
+    };
+    let Ok(cloned_anchor) = (unsafe { anchor.Clone() }) else {
+        return;
+    };
+    if let Ok(mut saved_anchor) = unsafe { &*anchor_ptr }.lock() {
+        *saved_anchor = Some(cloned_anchor);
+    } else {
+        return;
+    }
+    if let Ok(mut guard) = unsafe { &*guard_ptr }.lock() {
+        guard.arm(
+            CommitToken {
+                session: SessionId::new(1),
+                epoch: action.epoch,
+                action_id: action.id,
+            },
+            identity,
+            monotonic_ms().saturating_add(10_000),
+        );
+    }
+}
+
+fn handle_guarded_backspace(
+    ec: u32,
+    context: &ITfContext,
+    channel_ptr: *const SyncSender<FrontendMessage>,
+    guard_ptr: *const Mutex<RollbackGuard>,
+    anchor_ptr: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+) -> HRESULT {
+    let identity = context_identity(context);
+    let token = unsafe { &*guard_ptr }.lock().ok().and_then(|mut guard| {
+        let token = identity.and_then(|identity| guard.matching_token(identity, monotonic_ms()));
+        guard.disarm();
+        token
+    });
+    let anchor = unsafe { &*anchor_ptr }
+        .lock()
+        .ok()
+        .and_then(|mut anchor| anchor.take());
+
+    let result = delete_previous_selection_unit(ec, context, anchor.as_ref());
+    if matches!(result, Ok(true)) {
+        if let Some(token) = token {
+            let _ = unsafe { &*channel_ptr }.try_send(FrontendMessage::RollbackLearning {
+                header: placeholder_header(),
+                token,
+            });
+        }
+    }
+    if let Err(error) = result {
+        tsf_log(&format!("[CheIME] guarded backspace failed: {error}"));
+    }
+    S_OK
+}
+
+fn delete_previous_selection_unit(
+    ec: u32,
+    context: &ITfContext,
+    anchor: Option<&windows::Win32::UI::TextServices::ITfRange>,
+) -> Result<bool, String> {
+    let mut selection = [zeroed_selection()];
+    let mut fetched = 0u32;
+    unsafe { context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched) }
+        .map_err(|e| format!("GetSelection: {e}"))?;
+    if fetched == 0 {
+        release_selection_range(selection);
+        return Err("GetSelection fetched 0".into());
+    }
+    let Some(range) = selection[0].range.as_ref() else {
+        release_selection_range(selection);
+        return Err("GetSelection returned None range".into());
+    };
+    let result = (|| {
+        let selection_is_empty = unsafe { range.IsEmpty(ec) }
+            .map_err(|e| format!("IsEmpty: {e}"))?
+            .as_bool();
+        let anchor_matches = anchor.is_some_and(|anchor| {
+            selection_is_empty
+                && unsafe { range.IsEqualStart(ec, anchor, TF_ANCHOR_START) }
+                    .is_ok_and(|equal| equal.as_bool())
+                && unsafe { range.IsEqualEnd(ec, anchor, TF_ANCHOR_END) }
+                    .is_ok_and(|equal| equal.as_bool())
+        });
+
+        if selection_is_empty {
+            let mut shifted = 0;
+            unsafe { range.ShiftStart(ec, -1, &mut shifted, ptr::null()) }
+                .map_err(|e| format!("ShiftStart: {e}"))?;
+            if shifted == 0 {
+                return Ok(false);
+            }
+        }
+        unsafe { range.SetText(ec, 0, &[]) }.map_err(|e| format!("SetText: {e}"))?;
+        unsafe { range.Collapse(ec, TF_ANCHOR_START) }.map_err(|e| format!("Collapse: {e}"))?;
+        unsafe { context.SetSelection(ec, &selection) }
+            .map_err(|e| format!("SetSelection: {e}"))?;
+        Ok(anchor_matches)
+    })();
+    release_selection_range(selection);
+    result
 }
 
 /// End the active composition tracked in the composition mutex.
@@ -452,6 +592,18 @@ fn send_result(
     }
 }
 
+fn placeholder_header() -> cheime_protocol::MessageHeader {
+    cheime_protocol::MessageHeader {
+        protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+        client: cheime_model::ClientInstanceId::new(1),
+        session: cheime_model::SessionId::new(1),
+        epoch: cheime_model::SessionEpoch::new(1),
+        sequence: cheime_model::Sequence::new(0),
+        revision: cheime_model::Revision::new(0),
+        deployment: cheime_model::DeploymentGeneration::new(1),
+    }
+}
+
 /// Create a zeroed `TF_SELECTION` (range is `ManuallyDrop<Option<ITfRange>>`).
 fn zeroed_selection() -> TF_SELECTION {
     TF_SELECTION {
@@ -490,14 +642,19 @@ pub fn request_edit_session(
     action: PlatformAction,
     channel: *const SyncSender<FrontendMessage>,
     composition: *const Mutex<Option<ITfComposition>>,
+    guard: *const Mutex<RollbackGuard>,
+    anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
 ) {
     let channel_backup = channel;
     let action_backup = action.clone();
     let data = EditSessionData {
         context: context.clone(),
-        action,
+        action: Some(action),
+        guarded_backspace: false,
         channel,
         composition,
+        guard,
+        anchor,
     };
     let callback = EditSessionCallback::new(data); // ref_count = 1
 
@@ -536,5 +693,45 @@ pub fn request_edit_session(
             channel_backup,
             &Err(format!("RequestEditSession: {hr:?}")),
         );
+    }
+}
+
+pub fn request_guarded_backspace(
+    client_id: u32,
+    context: &ITfContext,
+    channel: *const SyncSender<FrontendMessage>,
+    composition: *const Mutex<Option<ITfComposition>>,
+    guard: *const Mutex<RollbackGuard>,
+    anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+) {
+    let data = EditSessionData {
+        context: context.clone(),
+        action: None,
+        guarded_backspace: true,
+        channel,
+        composition,
+        guard,
+        anchor,
+    };
+    let callback = EditSessionCallback::new(data);
+    let raw = Box::into_raw(callback);
+    let raw_void: *mut c_void = raw.cast();
+    let Some(session_ref) = (unsafe { ITfEditSession::from_raw_borrowed(&raw_void) }) else {
+        unsafe { EditSessionCallback::release(raw_void) };
+        return;
+    };
+    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0);
+    let hr = unsafe { context.RequestEditSession(client_id, session_ref, flags) };
+    unsafe { EditSessionCallback::release(raw_void) };
+    if hr.is_err() {
+        if let Ok(mut guard) = unsafe { &*guard }.lock() {
+            guard.disarm();
+        }
+        if let Ok(mut anchor) = unsafe { &*anchor }.lock() {
+            anchor.take();
+        }
+        tsf_log(&format!(
+            "[CheIME] guarded backspace RequestEditSession failed: {hr:?}"
+        ));
     }
 }

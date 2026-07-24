@@ -38,6 +38,28 @@ pub fn check_key(
     is_alt: bool,
     has_composition: bool,
 ) -> KeyAdmission {
+    check_key_with_guard(
+        mode,
+        cheime_activated,
+        key_code,
+        is_shift,
+        is_ctrl,
+        is_alt,
+        has_composition,
+        false,
+    )
+}
+
+pub fn check_key_with_guard(
+    mode: InputMode,
+    cheime_activated: bool,
+    key_code: u32,
+    is_shift: bool,
+    is_ctrl: bool,
+    is_alt: bool,
+    has_composition: bool,
+    has_rollback_guard: bool,
+) -> KeyAdmission {
     if !cheime_activated {
         // CheIME not active: only mode-toggle shortcut is accepted
         if is_ctrl && !is_shift && !is_alt && key_code == 0x20 {
@@ -59,9 +81,14 @@ pub fn check_key(
             }
             KeyAdmission::PassThrough
         }
-        InputMode::Chinese => {
-            chinese_mode_keys(key_code, is_shift, is_ctrl, is_alt, has_composition)
-        }
+        InputMode::Chinese => chinese_mode_keys(
+            key_code,
+            is_shift,
+            is_ctrl,
+            is_alt,
+            has_composition,
+            has_rollback_guard,
+        ),
     }
 }
 
@@ -72,6 +99,7 @@ fn chinese_mode_keys(
     is_ctrl: bool,
     is_alt: bool,
     has_composition: bool,
+    has_rollback_guard: bool,
 ) -> KeyAdmission {
     // Ctrl+Space / Shift+Space: toggle mode
     // Must check Shift+Space first (Ctrl key may also be reported as pressed
@@ -101,7 +129,7 @@ fn chinese_mode_keys(
 
         // Backspace: only handled when there is composition text
         0x08 => {
-            if has_composition {
+            if has_composition || has_rollback_guard {
                 KeyAdmission::Handled
             } else {
                 KeyAdmission::PassThrough
@@ -182,6 +210,23 @@ mod tests {
     const VK_Z: u32 = 0x5A;
     const VK_0: u32 = 0x30;
     const VK_9: u32 = 0x39;
+
+    #[test]
+    fn backspace_is_admitted_for_rollback_without_active_composition() {
+        assert_eq!(
+            check_key_with_guard(
+                InputMode::Chinese,
+                true,
+                VK_BACK,
+                false,
+                false,
+                false,
+                false,
+                true,
+            ),
+            KeyAdmission::Handled
+        );
+    }
 
     #[test]
     fn not_activated_passes_through_most_keys() {

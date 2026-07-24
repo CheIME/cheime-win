@@ -6,10 +6,12 @@
 //! pipe, or UI behavior is performed here.
 
 use crate::candidate_window::CandidateWindow;
+use crate::edit_session::request_guarded_backspace;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
-use crate::key_handler::{InputMode, KeyAdmission, check_key};
+use crate::key_handler::{InputMode, KeyAdmission, check_key_with_guard};
 use crate::language_bar::LanguageBarRegistration;
+use crate::rollback_guard::{GuardEvent, monotonic_ms};
 use crate::runtime::{
     ActivationResources, ApartmentState, FocusResources, rollback_before_drop, run_before_drop,
 };
@@ -611,7 +613,7 @@ unsafe fn toggle_input_mode(owner: *mut ComTip) {
 /// without producing side effects (no state mutation, no engine messages).
 unsafe extern "system" fn test_key(
     this: *mut c_void,
-    _: *mut c_void,
+    context_raw: *mut c_void,
     wparam: WPARAM,
     _lparam: LPARAM,
     eaten: *mut BOOL,
@@ -631,13 +633,14 @@ unsafe extern "system" fn test_key(
     }
 
     let ctrl_space = key_code == 0x20 && is_ctrl && !is_alt && !is_shift;
+    let has_rollback_guard = unsafe { rollback_guard_matches(owner, context_raw) };
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
             ((*owner).mode.get(), (*owner).has_composition.get())
         }))
     }) {
-        Some(Some((activated, (mode, has_comp)))) => check_key(
+        Some(Some((activated, (mode, has_comp)))) => check_key_with_guard(
             mode,
             activated,
             key_code,
@@ -645,6 +648,7 @@ unsafe extern "system" fn test_key(
             is_ctrl || ctrl_space,
             is_alt,
             has_comp,
+            has_rollback_guard,
         ),
         _ => KeyAdmission::PassThrough,
     };
@@ -675,7 +679,7 @@ unsafe extern "system" fn test_key_up(
 
 unsafe extern "system" fn key_down(
     this: *mut c_void,
-    _: *mut c_void,
+    context_raw: *mut c_void,
     wparam: WPARAM,
     _lparam: LPARAM,
     eaten: *mut BOOL,
@@ -703,13 +707,14 @@ unsafe extern "system" fn key_down(
     unsafe { (*owner).shift_armed.set(false) };
 
     let ctrl_space = key_code == 0x20 && is_ctrl && !is_alt && !is_shift;
+    let has_rollback_guard = unsafe { rollback_guard_matches(owner, context_raw) };
 
     let admission = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         Some((state.key_admission_enabled(), unsafe {
             ((*owner).mode.get(), (*owner).has_composition.get())
         }))
     }) {
-        Some(Some((activated, (mode, has_comp)))) => check_key(
+        Some(Some((activated, (mode, has_comp)))) => check_key_with_guard(
             mode,
             activated,
             key_code,
@@ -717,6 +722,7 @@ unsafe extern "system" fn key_down(
             is_ctrl || ctrl_space,
             is_alt,
             has_comp,
+            has_rollback_guard,
         ),
         _ => KeyAdmission::PassThrough,
     };
@@ -781,6 +787,20 @@ unsafe extern "system" fn key_down(
 
     match admission {
         KeyAdmission::Handled => {
+            if key_code == 0x08 && !unsafe { (*owner).has_composition.get() } && has_rollback_guard
+            {
+                let _ = unsafe { dispatch_guarded_backspace(owner, context_raw) };
+                unsafe { *eaten = BOOL(1) };
+                return S_OK;
+            }
+            if has_rollback_guard {
+                let event = if (0x41..=0x5A).contains(&key_code) || key_code == 0x20 {
+                    GuardEvent::TextInput
+                } else {
+                    GuardEvent::Navigation
+                };
+                unsafe { disarm_rollback(owner, event) };
+            }
             // Intercept +/- keys for page up/down — send UiCommand, not KeyCommand.
             // The engine processor doesn't handle these characters and would
             // return UnsupportedCharacter, killing the session.
@@ -864,11 +884,15 @@ unsafe extern "system" fn key_down(
             S_OK
         }
         KeyAdmission::ToggleMode => {
+            unsafe { disarm_rollback(owner, GuardEvent::Navigation) };
             unsafe { toggle_input_mode(owner) };
             unsafe { *eaten = BOOL(1) };
             S_OK
         }
         KeyAdmission::PassThrough => {
+            if has_rollback_guard {
+                unsafe { disarm_rollback(owner, GuardEvent::Navigation) };
+            }
             unsafe { *eaten = BOOL(0) };
             S_OK
         }
@@ -950,6 +974,64 @@ fn canonical_identity<T: Interface>(value: &T) -> Option<usize> {
         .map(|unknown| unknown.as_raw() as usize)
 }
 
+unsafe fn rollback_guard_matches(owner: *mut ComTip, context_raw: *mut c_void) -> bool {
+    let Some(context) = (unsafe { context_from_raw(context_raw) }) else {
+        return false;
+    };
+    let Some(identity) = canonical_identity(&context) else {
+        return false;
+    };
+    let Ok(candidate_window) = (unsafe { (*owner).candidate_window.try_borrow() }) else {
+        return false;
+    };
+    let Some(window) = candidate_window.as_ref() else {
+        return false;
+    };
+    if window.ctx_ptr.is_null() {
+        return false;
+    }
+    let window_context = unsafe { &*window.ctx_ptr };
+    window_context
+        .rollback_guard
+        .lock()
+        .is_ok_and(|guard| guard.matching_token(identity, monotonic_ms()).is_some())
+}
+
+unsafe fn disarm_rollback(owner: *mut ComTip, event: GuardEvent) {
+    if let Ok(candidate_window) = unsafe { (*owner).candidate_window.try_borrow() } {
+        if let Some(window) = candidate_window.as_ref() {
+            if !window.ctx_ptr.is_null() {
+                unsafe { &*window.ctx_ptr }.disarm_rollback(event);
+            }
+        }
+    }
+}
+
+unsafe fn dispatch_guarded_backspace(owner: *mut ComTip, context_raw: *mut c_void) -> bool {
+    let Some(context) = (unsafe { context_from_raw(context_raw) }) else {
+        return false;
+    };
+    let Ok(candidate_window) = (unsafe { (*owner).candidate_window.try_borrow() }) else {
+        return false;
+    };
+    let Some(window) = candidate_window.as_ref() else {
+        return false;
+    };
+    if window.ctx_ptr.is_null() {
+        return false;
+    }
+    let window_context = unsafe { &*window.ctx_ptr };
+    request_guarded_backspace(
+        window_context.client_id,
+        &context,
+        &window_context.channel,
+        &window_context.composition,
+        &window_context.rollback_guard,
+        &window_context.rollback_anchor,
+    );
+    true
+}
+
 unsafe fn document_from_raw(raw: *mut c_void) -> Option<ITfDocumentMgr> {
     unsafe { ITfDocumentMgr::from_raw_borrowed(&raw) }.cloned()
 }
@@ -998,6 +1080,7 @@ unsafe extern "system" fn uninit_document(this: *mut c_void, document: *mut c_vo
         return E_POINTER;
     }
     let owner = unsafe { owner_from_thread_mgr(this) };
+    unsafe { disarm_rollback(owner, GuardEvent::FocusChanged) };
     let ticket = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         state.begin_focus_update()
     }) {
@@ -1035,6 +1118,7 @@ unsafe extern "system" fn document_focus(
         return E_POINTER;
     }
     let owner = unsafe { owner_from_thread_mgr(this) };
+    unsafe { disarm_rollback(owner, GuardEvent::FocusChanged) };
     let ticket = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         state.begin_focus_update()
     }) {
@@ -1049,6 +1133,7 @@ unsafe extern "system" fn push_context(this: *mut c_void, context: *mut c_void) 
         return E_POINTER;
     }
     let owner = unsafe { owner_from_thread_mgr(this) };
+    unsafe { disarm_rollback(owner, GuardEvent::FocusChanged) };
     let ticket = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         state.begin_focus_update()
     }) {
@@ -1082,6 +1167,7 @@ unsafe extern "system" fn pop_context(this: *mut c_void, context: *mut c_void) -
         return E_POINTER;
     }
     let owner = unsafe { owner_from_thread_mgr(this) };
+    unsafe { disarm_rollback(owner, GuardEvent::FocusChanged) };
     let ticket = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         state.begin_focus_update()
     }) {

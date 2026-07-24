@@ -363,9 +363,14 @@ impl FrontendSession {
             FrontendMessage::PlatformActionResult { result, .. } => {
                 FrontendMessage::PlatformActionResult { header, result }
             }
-            FrontendMessage::RollbackLearning { token, .. } => {
-                FrontendMessage::RollbackLearning { header, token }
-            }
+            FrontendMessage::RollbackLearning { token, .. } => FrontendMessage::RollbackLearning {
+                header,
+                token: cheime_model::CommitToken {
+                    session: self.state.session,
+                    epoch: self.state.epoch,
+                    action_id: token.action_id,
+                },
+            },
         }
     }
 }
@@ -586,6 +591,37 @@ mod phase2_tests {
                 .observe_engine(&EngineMessage::SessionOpened { header: wrong })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn frontend_session_rewrites_rollback_token_identity() {
+        let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
+        let mut session = FrontendSession::new(state);
+        let input = FrontendMessage::RollbackLearning {
+            header: cheime_protocol::MessageHeader {
+                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                client: ClientInstanceId::new(1),
+                session: SessionId::new(1),
+                epoch: SessionEpoch::new(1),
+                sequence: cheime_model::Sequence::new(0),
+                revision: Revision::new(0),
+                deployment: DeploymentGeneration::new(1),
+            },
+            token: cheime_model::CommitToken {
+                session: SessionId::new(1),
+                epoch: SessionEpoch::new(1),
+                action_id: cheime_model::ActionId::new(55),
+            },
+        };
+
+        let FrontendMessage::RollbackLearning { header, token } = session.prepare(input) else {
+            panic!("expected rollback message");
+        };
+        assert_eq!(header.session, SessionId::new(7));
+        assert_eq!(header.epoch, SessionEpoch::new(8));
+        assert_eq!(token.session, SessionId::new(7));
+        assert_eq!(token.epoch, SessionEpoch::new(8));
+        assert_eq!(token.action_id, cheime_model::ActionId::new(55));
     }
 
     #[test]
