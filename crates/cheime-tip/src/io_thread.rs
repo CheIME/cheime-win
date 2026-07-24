@@ -28,6 +28,11 @@ pub const WM_CHEIME_SNAPSHOT: u32 = WM_USER + 100;
 pub const WM_CHEIME_ACTION: u32 = WM_USER + 101;
 pub const WM_CHEIME_STATUS: u32 = WM_USER + 102;
 
+pub(crate) struct PostedAction {
+    pub action: PlatformAction,
+    pub token: cheime_model::CommitToken,
+}
+
 pub struct IoThread {
     handle: Option<JoinHandle<()>>,
     stop_flag: Arc<AtomicBool>,
@@ -157,9 +162,19 @@ fn io_thread_main(
                             ));
                             post_snapshot(hwnd, &snapshot);
                         }
-                        EngineMessage::PlatformAction { action, .. } => {
+                        EngineMessage::PlatformAction { header, action } => {
                             tsf_log(&format!("[CheIME] IO action={action:?}"));
-                            post_action(hwnd, &action);
+                            post_action(
+                                hwnd,
+                                PostedAction {
+                                    token: cheime_model::CommitToken {
+                                        session: header.session,
+                                        epoch: header.epoch,
+                                        action_id: action.id,
+                                    },
+                                    action,
+                                },
+                            );
                         }
                         _ => {}
                     }
@@ -363,14 +378,9 @@ impl FrontendSession {
             FrontendMessage::PlatformActionResult { result, .. } => {
                 FrontendMessage::PlatformActionResult { header, result }
             }
-            FrontendMessage::RollbackLearning { token, .. } => FrontendMessage::RollbackLearning {
-                header,
-                token: cheime_model::CommitToken {
-                    session: self.state.session,
-                    epoch: self.state.epoch,
-                    action_id: token.action_id,
-                },
-            },
+            FrontendMessage::RollbackLearning { token, .. } => {
+                FrontendMessage::RollbackLearning { header, token }
+            }
         }
     }
 }
@@ -453,8 +463,8 @@ fn post_snapshot(hwnd: HWND, snapshot: &CandidateSnapshot) {
     }
 }
 
-fn post_action(hwnd: HWND, action: &PlatformAction) {
-    let b = Box::new(action.clone());
+fn post_action(hwnd: HWND, action: PostedAction) {
+    let b = Box::new(action);
     let ptr = Box::into_raw(b) as isize;
     unsafe {
         if PostMessageW(
@@ -465,7 +475,7 @@ fn post_action(hwnd: HWND, action: &PlatformAction) {
         )
         .is_err()
         {
-            drop(Box::from_raw(ptr as *mut PlatformAction));
+            drop(Box::from_raw(ptr as *mut PostedAction));
         }
     }
 }
@@ -594,7 +604,7 @@ mod phase2_tests {
     }
 
     #[test]
-    fn frontend_session_rewrites_rollback_token_identity() {
+    fn frontend_session_preserves_rollback_token_identity() {
         let state = validate_handshake(&hello(), 42, &ack(7)).unwrap();
         let mut session = FrontendSession::new(state);
         let input = FrontendMessage::RollbackLearning {
@@ -619,8 +629,8 @@ mod phase2_tests {
         };
         assert_eq!(header.session, SessionId::new(7));
         assert_eq!(header.epoch, SessionEpoch::new(8));
-        assert_eq!(token.session, SessionId::new(7));
-        assert_eq!(token.epoch, SessionEpoch::new(8));
+        assert_eq!(token.session, SessionId::new(1));
+        assert_eq!(token.epoch, SessionEpoch::new(1));
         assert_eq!(token.action_id, cheime_model::ActionId::new(55));
     }
 

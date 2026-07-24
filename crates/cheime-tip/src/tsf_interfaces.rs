@@ -9,7 +9,7 @@ use crate::candidate_window::CandidateWindow;
 use crate::edit_session::request_guarded_backspace;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
-use crate::key_handler::{InputMode, KeyAdmission, check_key_with_guard};
+use crate::key_handler::{InputMode, KeyAdmission, check_key_with_guard, is_guarded_backspace};
 use crate::language_bar::LanguageBarRegistration;
 use crate::rollback_guard::{GuardEvent, monotonic_ms};
 use crate::runtime::{
@@ -28,9 +28,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::TextServices::{
     ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext, ITfDisplayAttributeProvider,
     ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Vtbl,
-    ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor, ITfTextInputProcessor_Vtbl,
-    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl, ITfThreadMgr, ITfThreadMgrEventSink,
-    ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
+    ITfKeystrokeMgr, ITfSource, ITfTextEditSink, ITfTextEditSink_Vtbl, ITfTextInputProcessor,
+    ITfTextInputProcessor_Vtbl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl,
+    ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
 };
 use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -66,6 +66,7 @@ pub const IID_KEY: GUID = ITfKeyEventSink::IID;
 pub const IID_TM: GUID = ITfThreadMgrEventSink::IID;
 pub const IID_COMP: GUID = ITfCompositionSink::IID;
 pub const IID_DA: GUID = ITfDisplayAttributeProvider::IID;
+pub const IID_TEXT_EDIT: GUID = ITfTextEditSink::IID;
 
 #[repr(C)]
 pub struct PrimaryHeader {
@@ -92,6 +93,11 @@ pub struct DisplayHeader {
     pub lp_vtbl: *const ITfDisplayAttributeProvider_Vtbl,
 }
 
+#[repr(C)]
+pub struct TextEditHeader {
+    pub lp_vtbl: *const ITfTextEditSink_Vtbl,
+}
+
 /// The single allocation backing all interfaces exposed by a TIP instance.
 #[repr(C)]
 pub struct ComTip {
@@ -100,12 +106,15 @@ pub struct ComTip {
     pub thread_mgr: ThreadMgrHeader,
     pub composition: CompositionHeader,
     pub display: DisplayHeader,
+    pub text_edit: TextEditHeader,
     ref_count: AtomicU32,
     runtime: RefCell<ApartmentState>,
     channel: RefCell<Option<TipChannel>>,
     io_thread: RefCell<Option<IoThread>>,
     candidate_window: RefCell<Option<CandidateWindow>>,
     language_bar: RefCell<Option<LanguageBarRegistration>>,
+    text_edit_subscription: RefCell<Option<(ITfSource, u32)>>,
+    suppress_text_edit: Cell<bool>,
     mode: Rc<Cell<InputMode>>,
     shift_armed: Cell<bool>,
     pub has_composition: Cell<bool>,
@@ -126,16 +135,25 @@ impl ComTip {
             display: DisplayHeader {
                 lp_vtbl: &DISPLAY_VTBL,
             },
+            text_edit: TextEditHeader {
+                lp_vtbl: &TEXT_EDIT_VTBL,
+            },
             ref_count: AtomicU32::new(1),
             runtime: RefCell::new(ApartmentState::new()),
             channel: RefCell::new(None),
             io_thread: RefCell::new(None),
             candidate_window: RefCell::new(None),
             language_bar: RefCell::new(None),
+            text_edit_subscription: RefCell::new(None),
+            suppress_text_edit: Cell::new(false),
             mode: Rc::new(Cell::new(InputMode::Chinese)),
             shift_armed: Cell::new(false),
             has_composition: Cell::new(false),
         })
+    }
+
+    pub(crate) fn suppress_text_edit_notifications(&self, suppress: bool) {
+        self.suppress_text_edit.set(suppress);
     }
 
     unsafe fn interface(owner: *mut Self, iid: &GUID) -> Option<*mut c_void> {
@@ -149,6 +167,8 @@ impl ComTip {
             Some(unsafe { std::ptr::addr_of_mut!((*owner).composition).cast() })
         } else if *iid == IID_DA {
             Some(unsafe { std::ptr::addr_of_mut!((*owner).display).cast() })
+        } else if *iid == IID_TEXT_EDIT {
+            Some(unsafe { std::ptr::addr_of_mut!((*owner).text_edit).cast() })
         } else {
             None
         }
@@ -157,6 +177,9 @@ impl ComTip {
 
 impl Drop for ComTip {
     fn drop(&mut self) {
+        if let Some((source, cookie)) = self.text_edit_subscription.get_mut().take() {
+            let _ = unsafe { source.UnadviseSink(cookie) };
+        }
         self.language_bar.get_mut().take();
         if let Some(mut io_thread) = self.io_thread.get_mut().take() {
             io_thread.shutdown();
@@ -206,6 +229,13 @@ pub unsafe fn owner_from_composition(this: *mut c_void) -> *mut ComTip {
 /// Caller must guarantee `this` is a valid `*mut DisplayHeader` within a live `ComTip`.
 pub unsafe fn owner_from_display(this: *mut c_void) -> *mut ComTip {
     unsafe { owner_at_offset(this, std::mem::offset_of!(ComTip, display)) }
+}
+
+/// # Safety
+///
+/// Caller must guarantee `this` is a valid `*mut TextEditHeader` within a live `ComTip`.
+pub unsafe fn owner_from_text_edit(this: *mut c_void) -> *mut ComTip {
+    unsafe { owner_at_offset(this, std::mem::offset_of!(ComTip, text_edit)) }
 }
 
 unsafe fn query_owner(owner: *mut ComTip, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
@@ -280,6 +310,12 @@ iunknown_for_header!(
     display_release,
     owner_from_display
 );
+iunknown_for_header!(
+    text_edit_qi,
+    text_edit_add_ref,
+    text_edit_release,
+    owner_from_text_edit
+);
 
 const fn unknown_vtbl(
     query_interface: unsafe extern "system" fn(
@@ -321,6 +357,7 @@ unsafe extern "system" fn deactivate(this: *mut c_void) -> HRESULT {
         return E_POINTER;
     }
     let owner = unsafe { owner_from_primary(this) };
+    unsafe { replace_text_edit_subscription(owner, None) };
     let resources = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         state.begin_deactivation()
     }) {
@@ -476,6 +513,7 @@ unsafe extern "system" fn activate_ex(
     let focused_context = focused_document
         .as_ref()
         .and_then(|document| unsafe { document.GetTop() }.ok());
+    let focused_context_for_sink = focused_context.clone();
     if !activation_current(owner, token) {
         let _ = unsafe { source.UnadviseSink(cookie) };
         let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(client_id) };
@@ -519,6 +557,7 @@ unsafe extern "system" fn activate_ex(
     }
 
     tsf_log("[CheIME] ActivateEx ACCEPTED");
+    unsafe { replace_text_edit_subscription(owner, focused_context_for_sink.as_ref()) };
 
     match LanguageBarRegistration::attach(&manager_for_window, unsafe { (*owner).mode.clone() }) {
         Ok(registration) => {
@@ -787,8 +826,7 @@ unsafe extern "system" fn key_down(
 
     match admission {
         KeyAdmission::Handled => {
-            if key_code == 0x08 && !unsafe { (*owner).has_composition.get() } && has_rollback_guard
-            {
+            if is_guarded_backspace(key_code, has_rollback_guard) {
                 let _ = unsafe { dispatch_guarded_backspace(owner, context_raw) };
                 unsafe { *eaten = BOOL(1) };
                 return S_OK;
@@ -974,6 +1012,28 @@ fn canonical_identity<T: Interface>(value: &T) -> Option<usize> {
         .map(|unknown| unknown.as_raw() as usize)
 }
 
+unsafe fn replace_text_edit_subscription(owner: *mut ComTip, context: Option<&ITfContext>) {
+    let Ok(mut subscription) = (unsafe { (*owner).text_edit_subscription.try_borrow_mut() }) else {
+        return;
+    };
+    if let Some((source, cookie)) = subscription.take() {
+        let _ = unsafe { source.UnadviseSink(cookie) };
+    }
+    let Some(context) = context else {
+        return;
+    };
+    let Ok(source) = context.cast::<ITfSource>() else {
+        return;
+    };
+    let sink_raw = unsafe { std::ptr::addr_of_mut!((*owner).text_edit).cast() };
+    let Some(sink) = (unsafe { IUnknown::from_raw_borrowed(&sink_raw) }) else {
+        return;
+    };
+    if let Ok(cookie) = unsafe { source.AdviseSink(&IID_TEXT_EDIT, sink) } {
+        *subscription = Some((source, cookie));
+    }
+}
+
 unsafe fn rollback_guard_matches(owner: *mut ComTip, context_raw: *mut c_void) -> bool {
     let Some(context) = (unsafe { context_from_raw(context_raw) }) else {
         return false;
@@ -1021,14 +1081,16 @@ unsafe fn dispatch_guarded_backspace(owner: *mut ComTip, context_raw: *mut c_voi
         return false;
     }
     let window_context = unsafe { &*window.ctx_ptr };
-    request_guarded_backspace(
-        window_context.client_id,
-        &context,
-        &window_context.channel,
-        &window_context.composition,
-        &window_context.rollback_guard,
-        &window_context.rollback_anchor,
-    );
+    unsafe {
+        request_guarded_backspace(
+            window_context.client_id,
+            &context,
+            &window_context.channel,
+            &window_context.composition,
+            &window_context.rollback_guard,
+            &window_context.rollback_anchor,
+        );
+    }
     true
 }
 
@@ -1049,6 +1111,7 @@ unsafe fn set_runtime_focus(
     let context = document
         .as_ref()
         .and_then(|document| unsafe { document.GetTop() }.ok());
+    let context_for_sink = context.clone();
     let resources = FocusResources {
         document,
         document_identity: identity,
@@ -1062,6 +1125,7 @@ unsafe fn set_runtime_focus(
     match result {
         Ok(Ok(old)) => {
             drop(old);
+            unsafe { replace_text_edit_subscription(owner, context_for_sink.as_ref()) };
             S_OK
         }
         Ok(Err(rejected)) | Err(rejected) => {
@@ -1096,6 +1160,7 @@ unsafe extern "system" fn uninit_document(this: *mut c_void, document: *mut c_vo
     match old {
         Some(Some(old)) => {
             drop(old);
+            unsafe { replace_text_edit_subscription(owner, None) };
             // Hide candidate window when document is uninitialized
             if let Ok(cw) = (*owner).candidate_window.try_borrow() {
                 if let Some(ref cw) = *cw {
@@ -1141,6 +1206,7 @@ unsafe extern "system" fn push_context(this: *mut c_void, context: *mut c_void) 
         None => return E_UNEXPECTED,
     };
     let context = unsafe { context_from_raw(context) };
+    let context_for_sink = context.clone();
     let context_document = context
         .as_ref()
         .and_then(|context| unsafe { context.GetDocumentMgr() }.ok());
@@ -1153,6 +1219,7 @@ unsafe extern "system" fn push_context(this: *mut c_void, context: *mut c_void) 
     match replaced {
         Ok(Ok(old)) => {
             drop(old);
+            unsafe { replace_text_edit_subscription(owner, context_for_sink.as_ref()) };
             S_OK
         }
         Ok(Err(rejected)) | Err(rejected) => {
@@ -1182,6 +1249,7 @@ unsafe extern "system" fn pop_context(this: *mut c_void, context: *mut c_void) -
     let top = document
         .as_ref()
         .and_then(|document| unsafe { document.GetTop() }.ok());
+    let top_for_sink = top.clone();
     drop(popped);
     drop(document);
     let replaced =
@@ -1191,6 +1259,7 @@ unsafe extern "system" fn pop_context(this: *mut c_void, context: *mut c_void) -
     match replaced {
         Ok(Ok(old)) => {
             drop(old);
+            unsafe { replace_text_edit_subscription(owner, top_for_sink.as_ref()) };
             S_OK
         }
         Ok(Err(rejected)) | Err(rejected) => {
@@ -1207,6 +1276,27 @@ static THREAD_MGR_VTBL: ITfThreadMgrEventSink_Vtbl = ITfThreadMgrEventSink_Vtbl 
     OnSetFocus: document_focus,
     OnPushContext: push_context,
     OnPopContext: pop_context,
+};
+
+unsafe extern "system" fn text_edit_end(
+    this: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    _: *mut c_void,
+) -> HRESULT {
+    if this.is_null() {
+        return E_POINTER;
+    }
+    let owner = unsafe { owner_from_text_edit(this) };
+    if !unsafe { (*owner).suppress_text_edit.get() } {
+        unsafe { disarm_rollback(owner, GuardEvent::Navigation) };
+    }
+    S_OK
+}
+
+static TEXT_EDIT_VTBL: ITfTextEditSink_Vtbl = ITfTextEditSink_Vtbl {
+    base__: unknown_vtbl(text_edit_qi, text_edit_add_ref, text_edit_release),
+    OnEndEdit: text_edit_end,
 };
 
 unsafe extern "system" fn composition_terminated(

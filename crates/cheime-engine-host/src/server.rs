@@ -66,9 +66,11 @@ pub fn run_server(
     let expiry_service = Arc::clone(&learning);
     if let Err(error) = std::thread::Builder::new()
         .name(String::from("cheime-learning-expiry"))
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            confirm_expired_tick(&expiry_service);
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                confirm_expired_tick(&expiry_service);
+            }
         })
     {
         eprintln!("[engine] failed to start learning expiry worker: {error}");
@@ -283,9 +285,7 @@ fn connection_identity(
 mod tests {
     use super::*;
     use cheime_model::{ActionId, CommitToken};
-    use cheime_pipeline::learning::{
-        CommitRecord, FakeClock, LearningService, LEARNING_DELAY_MS,
-    };
+    use cheime_pipeline::learning::{CommitRecord, FakeClock, LEARNING_DELAY_MS, LearningService};
     use cheime_user_data::UserStore;
     use parking_lot::Mutex;
 

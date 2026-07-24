@@ -10,8 +10,8 @@ mod session_runner;
 
 use cheime_config::schema::SchemaConfig;
 use cheime_dictionary::{CompiledIndex, DictCache, DictColumn};
-use cheime_user_data::UserStore;
 use cheime_pipeline::learning::LearningService;
+use cheime_user_data::UserStore;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;

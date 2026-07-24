@@ -7,7 +7,6 @@
 
 use cheime_model::{
     CommitToken, PlatformAction, PlatformActionKind, PlatformActionOutcome, PlatformActionResult,
-    SessionId,
 };
 use cheime_protocol::FrontendMessage;
 use std::ffi::c_void;
@@ -37,6 +36,7 @@ pub const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
 struct EditSessionData {
     context: ITfContext,
     action: Option<PlatformAction>,
+    commit_token: Option<CommitToken>,
     guarded_backspace: bool,
     /// Raw pointer to a `SyncSender<FrontendMessage>` stored in `WindowContext`.
     /// Safe because the channel outlives all queued edit sessions.
@@ -162,16 +162,7 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
     match &action.kind {
         PlatformActionKind::Commit { text } => {
             tsf_log(&format!("[CheIME] edit: Commit text={text:?}"));
-            handle_commit(
-                ec,
-                &data.context,
-                text,
-                data.channel,
-                data.composition,
-                action,
-                data.guard,
-                data.anchor,
-            )
+            handle_commit(ec, &data, text, action)
         }
         PlatformActionKind::SetPreedit { text, cursor } => {
             tsf_log(&format!(
@@ -208,32 +199,25 @@ static EDIT_SESSION_VTBL: ITfEditSession_Vtbl = ITfEditSession_Vtbl {
 /// Handle `Commit`: replace composition text, end composition, send result.
 /// Uses the active composition range (not cursor selection) so the correct text
 /// is replaced even if the caret has moved.
-fn handle_commit(
-    ec: u32,
-    context: &ITfContext,
-    text: &str,
-    channel_ptr: *const SyncSender<FrontendMessage>,
-    composition_ptr: *const Mutex<Option<ITfComposition>>,
-    action: &PlatformAction,
-    guard_ptr: *const Mutex<RollbackGuard>,
-    anchor_ptr: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
-) -> HRESULT {
+fn handle_commit(ec: u32, data: &EditSessionData, text: &str, action: &PlatformAction) -> HRESULT {
     tsf_log(&format!(
         "[CheIME] handle_commit START text={text:?} ec={ec}"
     ));
     // Always use commit_at_selection — insert text at cursor, then end composition.
     // The ITfComposition from StartComposition may not survive across edit sessions
     // when no sink is provided, so we avoid relying on it for commit.
-    let result = commit_at_selection(ec, context, text);
+    let result = commit_at_selection(ec, &data.context, text);
     if let Ok(anchor) = result.as_ref() {
         // Clean up composition state regardless
-        let _ = end_active_composition(ec, composition_ptr);
-        arm_rollback_guard(context, action, anchor, guard_ptr, anchor_ptr);
+        let _ = end_active_composition(ec, data.composition);
+        if let Some(token) = data.commit_token {
+            arm_rollback_guard(&data.context, token, anchor, data.guard, data.anchor);
+        }
         tsf_log("[CheIME] handle_commit SUCCESS");
     }
     tsf_log(&format!("[CheIME] handle_commit RESULT: {result:?}"));
     let outcome = result.map(|_| ());
-    send_result(action, channel_ptr, &outcome);
+    send_result(action, data.channel, &outcome);
     S_OK
 }
 
@@ -431,7 +415,7 @@ fn context_identity(context: &ITfContext) -> Option<usize> {
 
 fn arm_rollback_guard(
     context: &ITfContext,
-    action: &PlatformAction,
+    token: CommitToken,
     anchor: &windows::Win32::UI::TextServices::ITfRange,
     guard_ptr: *const Mutex<RollbackGuard>,
     anchor_ptr: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
@@ -448,15 +432,7 @@ fn arm_rollback_guard(
         return;
     }
     if let Ok(mut guard) = unsafe { &*guard_ptr }.lock() {
-        guard.arm(
-            CommitToken {
-                session: SessionId::new(1),
-                epoch: action.epoch,
-                action_id: action.id,
-            },
-            identity,
-            monotonic_ms().saturating_add(10_000),
-        );
+        guard.arm(token, identity, monotonic_ms().saturating_add(10_000));
     }
 }
 
@@ -636,10 +612,12 @@ fn release_selection_range(mut sel: [TF_SELECTION; 1]) {
 /// * `channel` — raw pointer to the `SyncSender` (lives in `WindowContext`).
 /// * `composition` — raw pointer to the `Mutex<Option<ITfComposition>>` for
 ///   tracking composition state.
+#[allow(clippy::too_many_arguments)]
 pub fn request_edit_session(
     client_id: u32,
     context: &ITfContext,
     action: PlatformAction,
+    commit_token: CommitToken,
     channel: *const SyncSender<FrontendMessage>,
     composition: *const Mutex<Option<ITfComposition>>,
     guard: *const Mutex<RollbackGuard>,
@@ -650,6 +628,7 @@ pub fn request_edit_session(
     let data = EditSessionData {
         context: context.clone(),
         action: Some(action),
+        commit_token: Some(commit_token),
         guarded_backspace: false,
         channel,
         composition,
@@ -696,7 +675,11 @@ pub fn request_edit_session(
     }
 }
 
-pub fn request_guarded_backspace(
+/// # Safety
+///
+/// All raw pointers must remain valid for the duration of the synchronous TSF
+/// edit-session request.
+pub unsafe fn request_guarded_backspace(
     client_id: u32,
     context: &ITfContext,
     channel: *const SyncSender<FrontendMessage>,
@@ -707,6 +690,7 @@ pub fn request_guarded_backspace(
     let data = EditSessionData {
         context: context.clone(),
         action: None,
+        commit_token: None,
         guarded_backspace: true,
         channel,
         composition,

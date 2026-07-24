@@ -4,10 +4,10 @@
 //! The config is loaded by the TIP at startup and stored in `WindowContext`.
 
 use crate::edit_session::request_edit_session;
-use crate::io_thread::{WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
+use crate::io_thread::{PostedAction, WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
 use crate::rollback_guard::{GuardEvent, RollbackGuard};
 use crate::tsf_interfaces::{ComTip, tsf_log};
-use cheime_model::{CandidateSnapshot, PlatformAction};
+use cheime_model::CandidateSnapshot;
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::ui_config::{CandidateOrientation, UiConfig};
 use std::cell::Cell;
@@ -310,6 +310,9 @@ unsafe extern "system" fn candidate_window_proc(
                     status.0, status.1
                 ));
                 if !status.0 {
+                    if let Some(ctx) = ctx() {
+                        ctx.disarm_rollback(GuardEvent::FocusChanged);
+                    }
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_HIDE);
                     }
@@ -540,22 +543,29 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
 fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     if lparam.0 != 0 {
-        let action: Box<PlatformAction> = unsafe { Box::from_raw(lparam.0 as *mut PlatformAction) };
-        tsf_log(&format!("[CheIME] WM_ACTION action={action:?}"));
+        let posted: Box<PostedAction> = unsafe { Box::from_raw(lparam.0 as *mut PostedAction) };
+        tsf_log(&format!("[CheIME] WM_ACTION action={:?}", posted.action));
         match unsafe { ctx.thread_mgr.GetFocus() } {
             Ok(doc) => match unsafe { doc.GetTop() } {
                 Ok(context) => {
                     tsf_log("[CheIME] WM_ACTION: requesting edit session");
+                    if !ctx.tip.is_null() {
+                        unsafe { (*ctx.tip).suppress_text_edit_notifications(true) };
+                    }
                     request_edit_session(
                         ctx.client_id,
                         &context,
-                        *action,
+                        posted.action,
+                        posted.token,
                         &ctx.channel as *const SyncSender<FrontendMessage>,
                         &ctx.composition as *const Mutex<Option<ITfComposition>>,
                         &ctx.rollback_guard as *const Mutex<RollbackGuard>,
                         &ctx.rollback_anchor
                             as *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
                     );
+                    if !ctx.tip.is_null() {
+                        unsafe { (*ctx.tip).suppress_text_edit_notifications(false) };
+                    }
                 }
                 Err(e) => tsf_log(&format!("[CheIME] WM_ACTION: GetTop failed: {e:?}")),
             },
