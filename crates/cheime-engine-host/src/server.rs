@@ -285,6 +285,7 @@ fn connection_identity(
 mod tests {
     use super::*;
     use cheime_model::{ActionId, CommitToken};
+    use cheime_pipeline::decoder::SelectedLexeme;
     use cheime_pipeline::learning::{CommitRecord, FakeClock, LEARNING_DELAY_MS, LearningService};
     use cheime_user_data::UserStore;
     use parking_lot::Mutex;
@@ -314,7 +315,10 @@ mod tests {
                 text: String::from("旎皓"),
                 canonical_code: String::from("ni hao"),
                 schema: String::from("qp"),
-                lexemes: Vec::new(),
+                lexemes: vec![
+                    SelectedLexeme::test("旎", "ni"),
+                    SelectedLexeme::test("皓", "hao"),
+                ],
                 exact_phrase: false,
             },
         );
