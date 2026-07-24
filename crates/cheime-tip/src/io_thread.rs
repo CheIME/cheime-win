@@ -83,6 +83,33 @@ fn next_client_instance_id() -> u64 {
     (process << 32 | counter).max(1)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconnectReason {
+    WriteError,
+    IdentityError,
+    EngineDisconnected,
+    ReadError,
+}
+
+impl ReconnectReason {
+    fn status(self) -> (bool, &'static str) {
+        let detail = match self {
+            Self::WriteError => "write error",
+            Self::IdentityError => "engine identity error",
+            Self::EngineDisconnected => "engine disconnected",
+            Self::ReadError => "read error",
+        };
+        (false, detail)
+    }
+
+    fn retry_delay(self) -> std::time::Duration {
+        match self {
+            Self::EngineDisconnected => std::time::Duration::from_millis(100),
+            _ => std::time::Duration::ZERO,
+        }
+    }
+}
+
 fn io_thread_main(
     receiver: Receiver<FrontendMessage>,
     hwnd: HWND,
@@ -123,7 +150,7 @@ fn io_thread_main(
         };
 
         // 3. Message loop
-        loop {
+        let reconnect_reason = 'connected: loop {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -132,8 +159,7 @@ fn io_thread_main(
             while let Ok(msg) = receiver.try_recv() {
                 let msg = session.prepare(msg);
                 if writer.write_message(&codec, &msg).is_err() {
-                    post_status(hwnd, false, "write error");
-                    continue 'reconnect;
+                    break 'connected ReconnectReason::WriteError;
                 }
             }
             let _ = writer.flush();
@@ -150,7 +176,7 @@ fn io_thread_main(
                         }
                         Err(e) => {
                             tsf_log(&format!("[CheIME] IO: identity error: {e}, reconnecting"));
-                            continue 'reconnect;
+                            break 'connected ReconnectReason::IdentityError;
                         }
                     }
                     match msg {
@@ -181,13 +207,14 @@ fn io_thread_main(
                 }
                 Err(PipeError::TimedOut) => {}
                 Ok(None) | Err(PipeError::Disconnected) => {
-                    post_status(hwnd, false, "engine disconnected");
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    continue 'reconnect;
+                    break 'connected ReconnectReason::EngineDisconnected;
                 }
-                Err(_) => continue 'reconnect,
+                Err(_) => break 'connected ReconnectReason::ReadError,
             }
-        }
+        };
+        let (connected, detail) = reconnect_reason.status();
+        post_status(hwnd, connected, detail);
+        std::thread::sleep(reconnect_reason.retry_delay());
     }
 }
 
@@ -542,6 +569,21 @@ mod phase2_tests {
         assert_ne!(first, 0);
         assert_ne!(second, 0);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn every_connected_reconnect_reason_publishes_a_disconnected_status() {
+        let reasons = [
+            ReconnectReason::WriteError,
+            ReconnectReason::IdentityError,
+            ReconnectReason::EngineDisconnected,
+            ReconnectReason::ReadError,
+        ];
+
+        for reason in reasons {
+            assert!(!reason.status().0);
+            assert!(!reason.status().1.is_empty());
+        }
     }
 
     #[test]

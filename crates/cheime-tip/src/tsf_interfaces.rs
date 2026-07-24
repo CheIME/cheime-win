@@ -533,6 +533,32 @@ unsafe extern "system" fn activate_ex(
         focused_document_identity,
         focused_context,
     };
+
+    // Create every fallible UI resource before publishing the activation to
+    // ApartmentState. That keeps the existing rollback path in ownership of
+    // all advised TSF resources if window creation fails.
+    let mut channel = TipChannel::new(64);
+    let receiver = channel.take_receiver();
+    let channel_sender = channel.clone_sender();
+    let window_ctx =
+        CandidateWindow::new_context(manager_for_window.clone(), client_id, channel_sender, owner);
+    let cw = match CandidateWindow::create(window_ctx) {
+        Ok(cw) => cw,
+        Err(_) => {
+            rollback_before_drop(
+                resources,
+                |resources| {
+                    let _ = unsafe { resources.source.UnadviseSink(resources.thread_sink_cookie) };
+                },
+                |resources| {
+                    let _ = unsafe { resources.keystroke_mgr.UnadviseKeyEventSink(client_id) };
+                },
+            );
+            abort_activation(owner, token);
+            return E_UNEXPECTED;
+        }
+    };
+
     let completed = ApartmentState::try_with_owned(
         unsafe { &(*owner).runtime },
         resources,
@@ -571,24 +597,6 @@ unsafe extern "system" fn activate_ex(
     }
 
     // --- I/O and candidate window startup ---
-    let mut channel = TipChannel::new(64);
-    let receiver = channel.take_receiver();
-
-    // Build WindowContext with thread_mgr (cloned above before it moved),
-    // client_id, and channel sender.
-    let channel_sender = channel.clone_sender();
-    let window_ctx =
-        CandidateWindow::new_context(manager_for_window, client_id, channel_sender, owner);
-
-    let cw = match CandidateWindow::create(window_ctx) {
-        Ok(cw) => cw,
-        Err(_) => {
-            // Candidate window creation failed — continue without it
-            let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(client_id) };
-            abort_activation(owner, token);
-            return E_UNEXPECTED;
-        }
-    };
     let candidate_hwnd = cw.hwnd();
 
     let io = IoThread::spawn(
