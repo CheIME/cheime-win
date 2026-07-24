@@ -363,6 +363,9 @@ impl FrontendSession {
             FrontendMessage::PlatformActionResult { result, .. } => {
                 FrontendMessage::PlatformActionResult { header, result }
             }
+            FrontendMessage::RollbackLearning { token, .. } => {
+                FrontendMessage::RollbackLearning { header, token }
+            }
         }
     }
 }

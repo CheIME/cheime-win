@@ -13,11 +13,10 @@ use cheime_config::schema::SchemaConfig;
 use cheime_dictionary::CompiledIndex;
 use cheime_model::{ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId};
 use cheime_pipeline::factory::PipelineFactory;
+use cheime_pipeline::learning::LearningService;
 use cheime_protocol::MessageHeader;
 use cheime_tip_core::{PipeReader, PipeWriter};
-use cheime_user_data::UserStore;
 use cheime_wire::{ClientHello, HelloAck, HelloRejected, MessageCodec, ServerHello, WireError};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
@@ -61,17 +60,27 @@ impl From<cheime_tip_core::PipeError> for ServerError {
 pub fn run_server(
     config: &SchemaConfig,
     index: Arc<CompiledIndex>,
-    user_store: Arc<Mutex<UserStore>>,
+    learning: Arc<LearningService>,
     pipe_name: &str,
 ) -> Result<(), ServerError> {
+    let expiry_service = Arc::clone(&learning);
+    if let Err(error) = std::thread::Builder::new()
+        .name(String::from("cheime-learning-expiry"))
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            confirm_expired_tick(&expiry_service);
+        })
+    {
+        eprintln!("[engine] failed to start learning expiry worker: {error}");
+    }
     let stop = AtomicBool::new(false);
-    run_server_until(config, index, user_store, pipe_name, &stop)
+    run_server_until(config, index, learning, pipe_name, &stop)
 }
 
 fn run_server_until(
     config: &SchemaConfig,
     index: Arc<CompiledIndex>,
-    user_store: Arc<Mutex<UserStore>>,
+    learning: Arc<LearningService>,
     pipe_name: &str,
     stop: &AtomicBool,
 ) -> Result<(), ServerError> {
@@ -124,11 +133,11 @@ fn run_server_until(
 
         let cfg = config.clone();
         let idx = Arc::clone(&index);
-        let store = Arc::clone(&user_store);
+        let learning = Arc::clone(&learning);
         let raw_handle = handle.0 as usize; // raw handle value; safe across threads
         std::thread::spawn(move || {
             let h = HANDLE(raw_handle as *mut std::ffi::c_void);
-            if let Err(e) = handle_client(h, &cfg, idx, store, deployment, conn_id) {
+            if let Err(e) = handle_client(h, &cfg, idx, learning, deployment, conn_id) {
                 eprintln!("[engine] connection {} error: {e}", conn_id);
             }
         });
@@ -141,7 +150,7 @@ fn handle_client(
     pipe_handle: HANDLE,
     config: &SchemaConfig,
     index: Arc<CompiledIndex>,
-    user_store: Arc<Mutex<UserStore>>,
+    learning: Arc<LearningService>,
     deployment: DeploymentGeneration,
     connection_id: u64,
 ) -> Result<(), ServerError> {
@@ -233,7 +242,7 @@ fn handle_client(
     eprintln!("[engine] connection {connection_id} handshake complete");
 
     // 5. Build pipeline for this connection (per-session processor state)
-    let pipeline = PipelineFactory::build(config, Some(user_store), Some(index), None)
+    let pipeline = PipelineFactory::build_with_learning(config, Some(learning), Some(index), None)
         .map_err(|e| ServerError::Pipe(format!("pipeline build failed: {e}")))?;
 
     reader
@@ -246,6 +255,10 @@ fn handle_client(
         .map_err(|e| ServerError::Pipe(e.to_string()))?;
 
     Ok(())
+}
+
+fn confirm_expired_tick(service: &LearningService) {
+    service.confirm_expired();
 }
 
 fn connection_identity(
@@ -269,6 +282,12 @@ fn connection_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheime_model::{ActionId, CommitToken};
+    use cheime_pipeline::learning::{
+        CommitRecord, FakeClock, LearningService, LEARNING_DELAY_MS,
+    };
+    use cheime_user_data::UserStore;
+    use parking_lot::Mutex;
 
     #[test]
     fn connection_identity_allocates_unique_sessions() {
@@ -278,5 +297,29 @@ mod tests {
         assert_eq!(id1.session.get(), 2); // 1*2.max(1) = 2
         assert_eq!(id2.session.get(), 4); // 2*2.max(1) = 4
         assert!(id1.session != id2.session);
+    }
+
+    #[test]
+    fn expiry_tick_confirms_shared_store() {
+        let store = Arc::new(Mutex::new(UserStore::new("test")));
+        let clock = Arc::new(FakeClock::new(0));
+        let service = Arc::new(LearningService::new(store.clone(), clock.clone()));
+        service.commit_applied(
+            CommitToken {
+                session: SessionId::new(1),
+                epoch: SessionEpoch::new(1),
+                action_id: ActionId::new(1),
+            },
+            CommitRecord {
+                text: String::from("旎皓"),
+                canonical_code: String::from("ni hao"),
+                schema: String::from("qp"),
+                lexemes: Vec::new(),
+                exact_phrase: false,
+            },
+        );
+        clock.set(LEARNING_DELAY_MS);
+        confirm_expired_tick(&service);
+        assert_eq!(store.lock().query("ni hao")[0].text, "旎皓");
     }
 }
