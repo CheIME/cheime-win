@@ -306,14 +306,18 @@ after `PlatformActionOutcome::Applied`.
 test pipelines and non-learning pipelines remain simple:
 
 ```rust
-fn commit_applied(&self, record: CommitRecord, now: MonotonicTime);
-fn rollback_learning(&self, token: CommitToken, now: MonotonicTime);
-fn confirm_expired_learning(&self, now: MonotonicTime);
+fn commit_applied(&self, token: CommitToken, record: CommitRecord);
+fn rollback_learning(&self, token: CommitToken);
 ```
 
 `ComposablePipeline` forwards these hooks to a dedicated learning service that
 owns the shared `UserStore`. Translators only query user data; they do not
 decide commit lifecycle.
+
+The shared learning service also owns a monotonic `Clock`. Production injects
+one process-local `Instant`-based clock; tests inject a fake clock. Both commit
+staging and the engine-host expiry worker call the same service, so they use the
+same time origin without putting timestamps into the wire protocol.
 
 `UserStore` replaces `commit_pending`, `undo_last`, and
 `confirm_all_pending` with action-addressable operations:
@@ -329,10 +333,9 @@ from concurrent sessions cannot collide. Cancellation and expiry are
 idempotent. An expired entry is converted to the existing `LearnWord` event
 and persisted through the existing SQLite path.
 
-The engine host runs a small periodic worker against the shared store so an
-idle phrase becomes learned after ten seconds. Tests call the same expiry
-method with explicit times; production code is the only place that reads a
-monotonic clock.
+The engine host runs a small periodic worker against the shared learning
+service so an idle phrase becomes learned after ten seconds. Tests advance the
+fake clock; production code is the only place that reads a monotonic clock.
 
 ## Protocol and Windows TIP
 
