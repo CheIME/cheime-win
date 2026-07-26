@@ -222,3 +222,5 @@ Starting named pipe server...
 [engine] connection 111 error: pipe error: pipe error: pipe disconnected
 [engine] connection 110 error: pipe error: pipe error: pipe disconnected
 [engine] connection 104 error: pipe error: pipe error: pipe disconnected
+[engine] connection 112 handshake complete
+[engine] connection 112 error: pipe error: pipe error: pipe disconnected
