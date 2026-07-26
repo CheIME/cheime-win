@@ -646,6 +646,15 @@ fn is_shift_key(key_code: u32) -> bool {
     matches!(key_code, 0x10 | 0xA0 | 0xA1)
 }
 
+fn should_handle_standalone_shift(
+    activated: bool,
+    key_code: u32,
+    control_down: bool,
+    alt_down: bool,
+) -> bool {
+    activated && is_shift_key(key_code) && !control_down && !alt_down
+}
+
 unsafe fn toggle_input_mode(owner: *mut ComTip) {
     let previous = unsafe { (*owner).mode.get() };
     unsafe {
@@ -690,7 +699,14 @@ unsafe extern "system" fn test_key(
     let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
 
     if is_shift_key(key_code) {
-        unsafe { *eaten = BOOL(0) };
+        let activated = ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
+            state.key_admission_enabled()
+        })
+        .unwrap_or(false);
+        unsafe {
+            *eaten =
+                BOOL(should_handle_standalone_shift(activated, key_code, is_ctrl, is_alt) as i32);
+        }
         return S_OK;
     }
 
@@ -760,9 +776,10 @@ unsafe extern "system" fn key_down(
             state.key_admission_enabled()
         })
         .unwrap_or(false);
+        let should_handle = should_handle_standalone_shift(activated, key_code, is_ctrl, is_alt);
         unsafe {
-            (*owner).shift_armed.set(activated && !is_ctrl && !is_alt);
-            *eaten = BOOL(0);
+            (*owner).shift_armed.set(should_handle);
+            *eaten = BOOL(should_handle as i32);
         }
         return S_OK;
     }
@@ -1708,6 +1725,17 @@ mod tests {
         assert_eq!(unsafe { (*owner).mode.get() }, InputMode::Direct);
         assert!(!unsafe { (*owner).shift_armed.get() });
         assert_eq!(unsafe { release(key) }, 0);
+    }
+
+    #[test]
+    fn standalone_shift_is_claimed_during_test_and_keydown_phases() {
+        for key_code in [0x10, 0xA0, 0xA1] {
+            assert!(should_handle_standalone_shift(true, key_code, false, false));
+        }
+        assert!(!should_handle_standalone_shift(false, 0x10, false, false));
+        assert!(!should_handle_standalone_shift(true, 0x10, true, false));
+        assert!(!should_handle_standalone_shift(true, 0x10, false, true));
+        assert!(!should_handle_standalone_shift(true, 0x41, false, false));
     }
 
     #[test]
