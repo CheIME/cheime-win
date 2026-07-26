@@ -65,6 +65,9 @@ pub type SnapshotBox = Mutex<Option<(CandidateSnapshot, Vec<RowRender>)>>;
 
 pub struct RowRender {
     pub text: Vec<u16>,
+    pub label: Vec<u16>,
+    pub candidate: Vec<u16>,
+    pub comment: Vec<u16>,
     pub x: i32,
     pub y: i32,
     pub bounds: RECT,
@@ -88,14 +91,13 @@ pub struct WindowContext {
 
 impl Drop for WindowContext {
     fn drop(&mut self) {
-        let font = self
-            .render
-            .get_mut()
-            .map(|state| state.font)
-            .unwrap_or_default();
-        if !font.is_invalid() {
-            unsafe {
-                let _ = DeleteObject(font);
+        if let Ok(state) = self.render.get_mut() {
+            for font in [state.font, state.label_font, state.comment_font] {
+                if !font.is_invalid() {
+                    unsafe {
+                        let _ = DeleteObject(font);
+                    }
+                }
             }
         }
     }
@@ -105,6 +107,8 @@ pub struct RenderState {
     pub config: UiConfig,
     pub dark_mode: bool,
     pub font: HFONT,
+    pub label_font: HFONT,
+    pub comment_font: HFONT,
 }
 
 pub struct CandidateWindow {
@@ -224,6 +228,16 @@ impl CandidateWindow {
             &config.style.font_face,
             config.style.antialias_mode,
         );
+        let label_font = create_gdi_font(
+            config.style.label_font_point,
+            &config.style.label_font_face,
+            config.style.antialias_mode,
+        );
+        let comment_font = create_gdi_font(
+            config.style.comment_font_point,
+            &config.style.comment_font_face,
+            config.style.antialias_mode,
+        );
         Box::new(WindowContext {
             snapshot: Mutex::new(None),
             thread_mgr,
@@ -237,6 +251,8 @@ impl CandidateWindow {
                 config,
                 dark_mode: crate::ui_settings::system_uses_dark_theme(),
                 font,
+                label_font,
+                comment_font,
             }),
         })
     }
@@ -323,7 +339,14 @@ unsafe extern "system" fn candidate_window_proc(
                         if let Some((_, rows)) = st.as_ref() {
                             // Fix 3: use cached font instead of creating one per paint.
                             unsafe {
-                                paint(hdc, rows, &render.config, render.font);
+                                paint(
+                                    hdc,
+                                    rows,
+                                    &render.config,
+                                    render.font,
+                                    render.label_font,
+                                    render.comment_font,
+                                );
                             }
                         }
                     }
@@ -553,17 +576,39 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         if let Ok(mut render) = ctx.render.lock() {
             let font_changed = render.config.style.font_point != fresh.style.font_point
                 || render.config.style.font_face != fresh.style.font_face
+                || render.config.style.label_font_point != fresh.style.label_font_point
+                || render.config.style.label_font_face != fresh.style.label_font_face
+                || render.config.style.comment_font_point != fresh.style.comment_font_point
+                || render.config.style.comment_font_face != fresh.style.comment_font_face
                 || render.config.style.antialias_mode != fresh.style.antialias_mode;
             if font_changed {
-                let replacement = create_gdi_font(
-                    fresh.style.font_point,
-                    &fresh.style.font_face,
-                    fresh.style.antialias_mode,
-                );
-                let old = std::mem::replace(&mut render.font, replacement);
-                if !old.is_invalid() {
-                    unsafe {
-                        let _ = DeleteObject(old);
+                let replacements = [
+                    create_gdi_font(
+                        fresh.style.font_point,
+                        &fresh.style.font_face,
+                        fresh.style.antialias_mode,
+                    ),
+                    create_gdi_font(
+                        fresh.style.label_font_point,
+                        &fresh.style.label_font_face,
+                        fresh.style.antialias_mode,
+                    ),
+                    create_gdi_font(
+                        fresh.style.comment_font_point,
+                        &fresh.style.comment_font_face,
+                        fresh.style.antialias_mode,
+                    ),
+                ];
+                let old_fonts = [
+                    std::mem::replace(&mut render.font, replacements[0]),
+                    std::mem::replace(&mut render.label_font, replacements[1]),
+                    std::mem::replace(&mut render.comment_font, replacements[2]),
+                ];
+                for old in old_fonts {
+                    if !old.is_invalid() {
+                        unsafe {
+                            let _ = DeleteObject(old);
+                        }
                     }
                 }
             }
@@ -578,14 +623,21 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         ));
 
         let char_width = cfg.style.font_point.max(1);
-        let line_height =
-            (cfg.style.font_point + cfg.style.layout.hilite_padding_y.max(0) * 2).max(1);
-        let (rows, content_width, content_height) =
+        let content_height = cfg
+            .style
+            .font_point
+            .max(cfg.style.label_font_point)
+            .max(cfg.style.comment_font_point);
+        let line_height = (content_height + cfg.style.layout.hilite_padding_y.max(0) * 2).max(1);
+        let (mut rows, content_width, content_height) =
             build_rows(&boxed, line_height, char_width, &cfg.style);
         let max_width = cfg.style.layout.max_width;
         let mut window_width = content_width.max(cfg.style.layout.min_width).max(1);
         if max_width > 0 {
             window_width = window_width.min(max_width);
+        }
+        if cfg.style.layout.r#type == LayoutType::Vertical {
+            stretch_vertical_candidate_rows(&mut rows, window_width, cfg.style.layout.margin_x);
         }
         let window_height = content_height.max(1);
         // Sync has_composition from engine preedit
@@ -648,6 +700,13 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         }
     }
     LRESULT(0)
+}
+
+fn stretch_vertical_candidate_rows(rows: &mut [RowRender], window_width: i32, margin_x: i32) {
+    let right = (window_width - margin_x.max(0)).max(1);
+    for row in rows.iter_mut().filter(|row| row.candidate_index.is_some()) {
+        row.bounds.right = right.max(row.bounds.left + 1);
+    }
 }
 
 fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
@@ -797,7 +856,14 @@ fn handle_mouse_leave(hwnd: HWND, ctx: Option<&WindowContext>) -> LRESULT {
 // ── Rendering ─────────────────────────────────────────────────────────
 
 // Fix 3: accept cached font handle; no longer creates a font per paint call.
-unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
+unsafe fn paint(
+    hdc: HDC,
+    rows: &[RowRender],
+    config: &UiConfig,
+    font: HFONT,
+    label_font: HFONT,
+    comment_font: HFONT,
+) {
     let scheme = config.active_scheme(crate::ui_settings::system_uses_dark_theme());
     let fg = parse_hex(&scheme.candidate_text_color)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
@@ -807,8 +873,10 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
     let selected_border = parse_hex(&scheme.hilited_candidate_border_color)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
     let selected_mark = parse_hex(&scheme.hilited_mark_color).unwrap_or(selected_bg);
+    let label_color = parse_hex(&scheme.label_color).unwrap_or(fg);
+    let comment_color = parse_hex(&scheme.comment_text_color).unwrap_or(fg);
 
-    let old = unsafe { SelectObject(hdc, font) };
+    let original = unsafe { SelectObject(hdc, font) };
 
     for row in rows {
         unsafe {
@@ -822,14 +890,50 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
                     selected_mark,
                 );
             }
-            SetTextColor(hdc, if row.highlighted { selected_fg } else { fg });
             SetBkMode(hdc, TRANSPARENT);
-            let _ = TextOutW(hdc, row.x, row.y, &row.text);
+            if row.candidate_index.is_none() {
+                SetTextColor(hdc, parse_hex(&scheme.text_color).unwrap_or(fg));
+                let _ = SelectObject(hdc, font);
+                let _ = TextOutW(hdc, row.x, row.y, &row.text);
+                continue;
+            }
+            let mut x = row.x;
+            if !row.label.is_empty() {
+                SetTextColor(
+                    hdc,
+                    if row.highlighted {
+                        selected_fg
+                    } else {
+                        label_color
+                    },
+                );
+                let _ = SelectObject(hdc, label_font);
+                let _ = TextOutW(hdc, x, row.y, &row.label);
+                x += text_utf16_width(&row.label, config.style.label_font_point)
+                    + config.style.layout.hilite_spacing.max(0);
+            }
+            SetTextColor(hdc, if row.highlighted { selected_fg } else { fg });
+            let _ = SelectObject(hdc, font);
+            let _ = TextOutW(hdc, x, row.y, &row.candidate);
+            x += text_utf16_width(&row.candidate, config.style.font_point);
+            if !row.comment.is_empty() {
+                x += config.style.layout.hilite_spacing.max(0);
+                SetTextColor(
+                    hdc,
+                    if row.highlighted {
+                        selected_fg
+                    } else {
+                        comment_color
+                    },
+                );
+                let _ = SelectObject(hdc, comment_font);
+                let _ = TextOutW(hdc, x, row.y, &row.comment);
+            }
         }
     }
-    if !old.is_invalid() {
+    if !original.is_invalid() {
         unsafe {
-            SelectObject(hdc, old);
+            SelectObject(hdc, original);
         }
     }
     // Do NOT delete the font — it is cached in WindowContext.
@@ -875,6 +979,9 @@ fn build_rows(
         let width = text_pixel_width(&preedit, char_width);
         rows.push(RowRender {
             text: preedit.encode_utf16().collect(),
+            label: Vec::new(),
+            candidate: Vec::new(),
+            comment: Vec::new(),
             x: pad_x,
             y,
             bounds: RECT {
@@ -895,16 +1002,10 @@ fn build_rows(
         .take(config.page_size.max(1))
         .enumerate()
         .map(|(index, candidate)| {
-            let mut text = String::new();
-            use std::fmt::Write;
-            if snapshot.highlighted == Some(candidate.id) && !config.mark_text.is_empty() {
-                text.push_str(&config.mark_text);
-                text.push(' ');
-            }
+            let mut label_text = String::new();
             if config.show_labels {
                 let label = if index == 9 { 0 } else { index + 1 };
-                text.push_str(&config.label_format.replace("%s", &label.to_string()));
-                text.push(' ');
+                label_text = config.label_format.replace("%s", &label.to_string());
             }
             let candidate_text = if config.candidate_abbreviate_length > 0
                 && candidate.text.chars().count() > config.candidate_abbreviate_length
@@ -919,18 +1020,31 @@ fn build_rows(
             } else {
                 candidate.text.clone()
             };
-            text.push_str(&candidate_text);
-            if let Some(annotation) = &candidate.annotation {
-                let _ = write!(text, " {annotation}");
-            }
-            (index, candidate, text)
+            let comment_text = candidate.annotation.clone().unwrap_or_default();
+            let text = [
+                label_text.as_str(),
+                candidate_text.as_str(),
+                comment_text.as_str(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            (
+                index,
+                candidate,
+                text,
+                label_text,
+                candidate_text,
+                comment_text,
+            )
         })
         .collect::<Vec<_>>();
 
     match config.layout.r#type {
         LayoutType::Vertical => {
-            for (index, candidate, text) in candidates {
-                let width = text_pixel_width(&text, char_width);
+            for (index, candidate, text, label, candidate_text, comment) in candidates {
+                let width = segmented_text_width(&label, &candidate_text, &comment, config);
                 let marked = snapshot.highlighted == Some(candidate.id);
                 let mark_inset = if marked && config.layout.mark_width > 0 {
                     config.layout.mark_gap.max(0)
@@ -941,12 +1055,18 @@ fn build_rows(
                 };
                 rows.push(RowRender {
                     text: text.encode_utf16().collect(),
-                    x: pad_x + mark_inset,
-                    y,
+                    label: label.encode_utf16().collect(),
+                    candidate: candidate_text.encode_utf16().collect(),
+                    comment: comment.encode_utf16().collect(),
+                    x: pad_x + config.layout.hilite_padding_x.max(0) + mark_inset,
+                    y: y + config.layout.hilite_padding_y.max(0),
                     bounds: RECT {
-                        left: 0,
+                        left: pad_x,
                         top: y,
-                        right: width + pad_x * 2 + mark_inset,
+                        right: width
+                            + pad_x
+                            + config.layout.hilite_padding_x.max(0) * 2
+                            + mark_inset,
                         bottom: y + line_height,
                     },
                     candidate_index: Some(index),
@@ -956,9 +1076,9 @@ fn build_rows(
             }
         }
         LayoutType::Horizontal => {
-            let mut x = 0;
-            for (index, candidate, text) in candidates {
-                let width = text_pixel_width(&text, char_width);
+            let mut x = pad_x;
+            for (index, candidate, text, label, candidate_text, comment) in candidates {
+                let width = segmented_text_width(&label, &candidate_text, &comment, config);
                 let marked = snapshot.highlighted == Some(candidate.id);
                 let mark_inset = if marked && config.layout.mark_width > 0 {
                     config.layout.mark_gap.max(0)
@@ -970,8 +1090,11 @@ fn build_rows(
                 let right = x + width + config.layout.hilite_padding_x.max(0) * 2 + mark_inset;
                 rows.push(RowRender {
                     text: text.encode_utf16().collect(),
+                    label: label.encode_utf16().collect(),
+                    candidate: candidate_text.encode_utf16().collect(),
+                    comment: comment.encode_utf16().collect(),
                     x: x + config.layout.hilite_padding_x.max(0) + mark_inset,
-                    y,
+                    y: y + config.layout.hilite_padding_y.max(0),
                     bounds: RECT {
                         left: x,
                         top: y,
@@ -989,12 +1112,15 @@ fn build_rows(
         }
     }
 
-    let width = rows
+    let mut width = rows
         .iter()
         .map(|row| row.bounds.right)
         .max()
         .unwrap_or(0)
         .max(pad_x * 2);
+    if config.layout.r#type == LayoutType::Horizontal {
+        width += pad_x;
+    }
     let height = (y + pad_y).max(line_height);
     (rows, width, height)
 }
@@ -1009,6 +1135,23 @@ fn text_pixel_width(text: &str, char_width: i32) -> i32 {
             }
         })
         .sum()
+}
+
+fn text_utf16_width(text: &[u16], char_width: i32) -> i32 {
+    text_pixel_width(&String::from_utf16_lossy(text), char_width)
+}
+
+fn segmented_text_width(label: &str, candidate: &str, comment: &str, config: &StyleConfig) -> i32 {
+    let mut width = text_pixel_width(candidate, config.font_point);
+    if !label.is_empty() {
+        width +=
+            text_pixel_width(label, config.label_font_point) + config.layout.hilite_spacing.max(0);
+    }
+    if !comment.is_empty() {
+        width += text_pixel_width(comment, config.comment_font_point)
+            + config.layout.hilite_spacing.max(0);
+    }
+    width
 }
 
 unsafe fn draw_selection_box(
@@ -1373,10 +1516,16 @@ mod tests {
             status: SessionStatus::Composing,
         };
         let cfg = StyleConfig::default();
-        let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
+        let (mut rows, _, _) = build_rows(&snap, 22, 18, &cfg);
         assert!(rows.len() >= 2, "preedit + at least 1 candidate");
         // First row = preedit, not highlighted
         assert!(!rows[0].highlighted);
+        stretch_vertical_candidate_rows(&mut rows, 320, cfg.layout.margin_x);
+        assert!(
+            rows.iter()
+                .filter(|row| row.candidate_index.is_some())
+                .all(|row| row.bounds.right == 320 - cfg.layout.margin_x)
+        );
     }
 
     #[test]
@@ -1421,7 +1570,7 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].bounds.top, candidates[1].bounds.top);
         assert!(candidates[1].bounds.left >= candidates[0].bounds.right);
-        assert_eq!(candidates[0].bounds.right - candidates[0].bounds.left, 62);
+        assert_eq!(candidates[0].bounds.right - candidates[0].bounds.left, 82);
         assert!(!String::from_utf16_lossy(&candidates[0].text).contains("1."));
         assert!(width > 0);
         assert_eq!(height, 66);
