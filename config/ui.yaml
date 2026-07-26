@@ -1,29 +1,69 @@
-# CheIME UI settings
-# Edit this file, save it, then switch away from CheIME and back to reload.
+# CheIME candidate-window appearance.
+# All colors are CSS-style #RRGGBB (red, green, blue), never Weasel's BGR.
 
-window:
-  # Candidate-window height in pixels. 0 = automatic.
-  height: 0
-  # Corner radius in pixels. It is capped at half the actual window height.
-  corner_radius: 3
-
-candidate:
-  # Maximum number of candidate words shown.
-  page_size: 8
-  # horizontal or vertical
-  orientation: horizontal
-  # Show candidate numbers.
+style:
+  color_scheme: cheime_light
+  color_scheme_dark: cheime_dark
+  font_face: "Microsoft YaHei UI"
+  label_font_face: "Microsoft YaHei UI"
+  comment_font_face: "Microsoft YaHei UI"
+  font_point: 18
+  label_font_point: 13
+  comment_font_point: 13
+  page_size: 5
   show_labels: true
+  label_format: "%s"
+  inline_preedit: false
+  preedit_type: composition
+  antialias_mode: cleartype
+  mark_text: ""
+  hover_type: none
+  paging_on_scroll: true
+  candidate_abbreviate_length: 0
 
-selection_box:
-  # Outline color of the currently selected candidate.
-  outline_color: "#0078d4"
-  # null = inherit window.corner_radius; use 0 for square corners.
-  corner_radius: null
-  # Size relative to the candidate item, from 0.0 to 1.0.
-  relative_size: 1.0
+  layout:
+    type: vertical
+    min_width: 280
+    max_width: 0
+    margin_x: 10
+    margin_y: 8
+    spacing: 6
+    candidate_spacing: 4
+    hilite_spacing: 8
+    hilite_padding_x: 10
+    hilite_padding_y: 5
+    corner_radius: 10
+    hilited_corner_radius: 7
+    border_width: 1
+    shadow_radius: 0
+    shadow_offset_x: 0
+    shadow_offset_y: 8
+    caret_offset_x: 0
+    caret_offset_y: 8
 
-theme:
-  colors:
-    # Candidate-window background color (#RRGGBB or #RGB).
-    background: "#ffffff"
+preset_color_schemes:
+  cheime_light:
+    name: "澈 · 明"
+    back_color: "#FFFFFF"
+    border_color: "#E1E4E8"
+    text_color: "#1F2328"
+    candidate_text_color: "#1F2328"
+    comment_text_color: "#6E7781"
+    label_color: "#8C959F"
+    hilited_candidate_text_color: "#FFFFFF"
+    hilited_candidate_back_color: "#316DCA"
+    hilited_mark_color: "#316DCA"
+    shadow_color: "#8C959F"
+
+  cheime_dark:
+    name: "澈 · 暗"
+    back_color: "#202124"
+    border_color: "#34363A"
+    text_color: "#E8EAED"
+    candidate_text_color: "#E8EAED"
+    comment_text_color: "#9AA0A6"
+    label_color: "#9AA0A6"
+    hilited_candidate_text_color: "#FFFFFF"
+    hilited_candidate_back_color: "#3F6AE0"
+    hilited_mark_color: "#8AB4F8"
+    shadow_color: "#111318"

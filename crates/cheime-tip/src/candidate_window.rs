@@ -9,7 +9,7 @@ use crate::rollback_guard::{GuardEvent, RollbackGuard};
 use crate::tsf_interfaces::{ComTip, tsf_log};
 use cheime_model::CandidateSnapshot;
 use cheime_protocol::FrontendMessage;
-use cheime_tip_core::ui_config::{CandidateOrientation, UiConfig};
+use cheime_tip_core::ui_config::{AntialiasMode, LayoutType, PreeditType, StyleConfig, UiConfig};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -20,11 +20,19 @@ use windows::Win32::Foundation::{
     BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen, CreateFontW, CreateRectRgn,
-    CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint,
-    FF_DONTCARE, FW_NORMAL, FillRect, FrameRgn, GetSysColor, HBRUSH, HDC, HFONT, InvalidateRect,
+    ANTIALIASED_QUALITY, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    ClientToScreen, CreateFontW, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush,
+    DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor,
+    HBRUSH, HDC, HFONT, InvalidateRect, NONANTIALIASED_QUALITY,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject,
     SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
+};
+use windows::Win32::Graphics::GdiPlus::{
+    FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
+    GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
+    GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetSmoothingMode, GdiplusStartup,
+    GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
+    SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
@@ -42,6 +50,7 @@ use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
 const CANDIDATE_WINDOW_CLASS: &str = "CheIME_CandidateWindow";
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_CHEIME_RELOAD_CONFIG: u32 = 0x8000 + 0x124;
 
 // ── COM constants (local copies to avoid coupling) ────────────────────
 const S_OK: HRESULT = HRESULT(0);
@@ -50,6 +59,7 @@ const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
 
 /// One-time guard for `RegisterClassW` (Fix 4: prevents GDI brush leak).
 static REGISTER_WNDCLASS: Once = Once::new();
+static START_GDIPLUS: Once = Once::new();
 
 pub type SnapshotBox = Mutex<Option<(CandidateSnapshot, Vec<RowRender>)>>;
 
@@ -73,20 +83,28 @@ pub struct WindowContext {
     pub rollback_guard: Mutex<RollbackGuard>,
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
     pub tip: *mut ComTip,
-    /// UI configuration (never modified after window creation; safe shared ref).
-    pub config: UiConfig,
-    /// Cached GDI font handle; created once, freed on drop (Fix 3).
-    pub cached_font: HFONT,
+    pub render: Mutex<RenderState>,
 }
 
 impl Drop for WindowContext {
     fn drop(&mut self) {
-        if !self.cached_font.is_invalid() {
+        let font = self
+            .render
+            .get_mut()
+            .map(|state| state.font)
+            .unwrap_or_default();
+        if !font.is_invalid() {
             unsafe {
-                let _ = DeleteObject(self.cached_font);
+                let _ = DeleteObject(font);
             }
         }
     }
+}
+
+pub struct RenderState {
+    pub config: UiConfig,
+    pub dark_mode: bool,
+    pub font: HFONT,
 }
 
 pub struct CandidateWindow {
@@ -95,8 +113,8 @@ pub struct CandidateWindow {
 }
 
 /// Create a GDI font for the given pixel size (Microsoft YaHei, normal weight).
-fn create_gdi_font(font_size: i32) -> HFONT {
-    let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+fn create_gdi_font(font_size: i32, font_face: &str, antialias: AntialiasMode) -> HFONT {
+    let face: Vec<u16> = font_face.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         CreateFontW(
             font_size,
@@ -110,7 +128,12 @@ fn create_gdi_font(font_size: i32) -> HFONT {
             DEFAULT_CHARSET.0 as u32,
             OUT_DEFAULT_PRECIS.0 as u32,
             0,
-            DEFAULT_QUALITY.0 as u32,
+            match antialias {
+                AntialiasMode::Default => DEFAULT_QUALITY.0,
+                AntialiasMode::ForceDword | AntialiasMode::Cleartype => CLEARTYPE_QUALITY.0,
+                AntialiasMode::Grayscale => ANTIALIASED_QUALITY.0,
+                AntialiasMode::Aliased => NONANTIALIASED_QUALITY.0,
+            } as u32,
             FF_DONTCARE.0 as u32 | DEFAULT_CHARSET.0 as u32,
             windows::core::PCWSTR::from_raw(face.as_ptr()),
         )
@@ -196,7 +219,11 @@ impl CandidateWindow {
         tip: *mut ComTip,
     ) -> Box<WindowContext> {
         let config = crate::ui_settings::load_config();
-        let cached_font = create_gdi_font(config.candidate.font_size);
+        let font = create_gdi_font(
+            config.style.font_point,
+            &config.style.font_face,
+            config.style.antialias_mode,
+        );
         Box::new(WindowContext {
             snapshot: Mutex::new(None),
             thread_mgr,
@@ -206,8 +233,11 @@ impl CandidateWindow {
             rollback_guard: Mutex::new(RollbackGuard::default()),
             rollback_anchor: Mutex::new(None),
             tip,
-            cached_font,
-            config,
+            render: Mutex::new(RenderState {
+                config,
+                dark_mode: crate::ui_settings::system_uses_dark_theme(),
+                font,
+            }),
         })
     }
 }
@@ -270,23 +300,30 @@ unsafe extern "system" fn candidate_window_proc(
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             if !hdc.is_invalid() {
                 if let Some(ctx) = ctx() {
-                    let background = parse_hex(&ctx.config.theme.colors.background)
+                    let Ok(render) = ctx.render.lock() else {
+                        unsafe {
+                            let _ = EndPaint(hwnd, &ps);
+                        };
+                        return LRESULT(0);
+                    };
+                    let scheme = render.config.active_scheme(render.dark_mode);
+                    let background = parse_hex(&scheme.back_color)
                         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOW) }));
-                    let brush = unsafe { CreateSolidBrush(background) };
                     let mut client = RECT::default();
                     if unsafe { GetClientRect(hwnd, &mut client) }.is_ok() {
-                        unsafe {
-                            FillRect(hdc, &client, brush);
-                        }
-                    }
-                    unsafe {
-                        let _ = DeleteObject(brush);
+                        draw_window_surface(
+                            hdc,
+                            client,
+                            &render.config,
+                            render.dark_mode,
+                            background,
+                        );
                     }
                     if let Ok(st) = ctx.snapshot.lock() {
                         if let Some((_, rows)) = st.as_ref() {
                             // Fix 3: use cached font instead of creating one per paint.
                             unsafe {
-                                paint(hdc, rows, &ctx.config, ctx.cached_font);
+                                paint(hdc, rows, &render.config, render.font);
                             }
                         }
                     }
@@ -299,6 +336,21 @@ unsafe extern "system" fn candidate_window_proc(
         }
 
         WM_CHEIME_SNAPSHOT => handle_snapshot(hwnd, lparam, ctx()),
+
+        WM_CHEIME_RELOAD_CONFIG => {
+            if let Some(ctx) = ctx() {
+                let snapshot = ctx
+                    .snapshot
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.as_ref().map(|(snapshot, _)| snapshot.clone()));
+                if let Some(snapshot) = snapshot {
+                    let raw = Box::into_raw(Box::new(snapshot));
+                    return handle_snapshot(hwnd, LPARAM(raw as isize), Some(ctx));
+                }
+            }
+            LRESULT(0)
+        }
 
         WM_CHEIME_ACTION => handle_action(lparam, ctx()),
 
@@ -338,6 +390,38 @@ unsafe extern "system" fn candidate_window_proc(
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+fn draw_window_surface(
+    hdc: HDC,
+    bounds: RECT,
+    config: &UiConfig,
+    dark_mode: bool,
+    background: COLORREF,
+) {
+    with_antialiased_graphics(hdc, |graphics| unsafe {
+        let radius = config.style.layout.corner_radius.max(0);
+        let path = rounded_path(bounds, radius);
+        if path.is_null() {
+            return;
+        }
+        let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+        if GdipCreateSolidFill(colorref_to_argb(background), &mut brush).0 == 0 {
+            let _ = GdipFillPath(graphics, brush.cast::<GpBrush>(), path);
+            let _ = GdipDeleteBrush(brush.cast::<GpBrush>());
+        }
+        let width = config.style.layout.border_width.max(0);
+        if width > 0 {
+            let color = parse_hex(&config.active_scheme(dark_mode).border_color)
+                .unwrap_or(COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
+            let mut pen: *mut GpPen = std::ptr::null_mut();
+            if GdipCreatePen1(colorref_to_argb(color), width as f32, UnitPixel, &mut pen).0 == 0 {
+                let _ = GdipDrawPath(graphics, pen, path);
+                let _ = GdipDeletePen(pen);
+            }
+        }
+        let _ = GdipDeletePath(path);
+    });
 }
 
 // ── Message handlers ──────────────────────────────────────────────────
@@ -460,32 +544,50 @@ fn try_get_text_ext(ctx: &WindowContext) -> Option<(i32, i32)> {
 
 fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
-    let cfg = &ctx.config;
 
     if lparam.0 != 0 {
         let boxed: Box<CandidateSnapshot> =
             unsafe { Box::from_raw(lparam.0 as *mut CandidateSnapshot) };
+        let fresh = crate::ui_settings::load_config();
+        let dark_mode = crate::ui_settings::system_uses_dark_theme();
+        if let Ok(mut render) = ctx.render.lock() {
+            let font_changed = render.config.style.font_point != fresh.style.font_point
+                || render.config.style.font_face != fresh.style.font_face
+                || render.config.style.antialias_mode != fresh.style.antialias_mode;
+            if font_changed {
+                let replacement = create_gdi_font(
+                    fresh.style.font_point,
+                    &fresh.style.font_face,
+                    fresh.style.antialias_mode,
+                );
+                let old = std::mem::replace(&mut render.font, replacement);
+                if !old.is_invalid() {
+                    unsafe {
+                        let _ = DeleteObject(old);
+                    }
+                }
+            }
+            render.config = fresh.clone();
+            render.dark_mode = dark_mode;
+        }
+        let cfg = &fresh;
         tsf_log(&format!(
             "[CheIME] WM_SNAPSHOT preedit={} candidates={}",
             boxed.preedit,
             boxed.candidates.len()
         ));
 
-        let char_width = cfg
-            .candidate
-            .char_width
-            .unwrap_or(cfg.candidate.font_size)
-            .max(1);
-        let line_height = cfg.candidate.line_height.max(1);
+        let char_width = cfg.style.font_point.max(1);
+        let line_height =
+            (cfg.style.font_point + cfg.style.layout.hilite_padding_y.max(0) * 2).max(1);
         let (rows, content_width, content_height) =
-            build_rows(&boxed, line_height, char_width, &cfg.candidate);
-        let window_width = content_width.max(cfg.window.min_width).max(1);
-        let window_height = if cfg.window.height > 0 {
-            cfg.window.height
-        } else {
-            content_height
+            build_rows(&boxed, line_height, char_width, &cfg.style);
+        let max_width = cfg.style.layout.max_width;
+        let mut window_width = content_width.max(cfg.style.layout.min_width).max(1);
+        if max_width > 0 {
+            window_width = window_width.min(max_width);
         }
-        .max(1);
+        let window_height = content_height.max(1);
         // Sync has_composition from engine preedit
         if !ctx.tip.is_null() {
             unsafe {
@@ -509,13 +611,16 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         let (x, y) = get_composition_screen_rect(ctx)
             .map(|(left, bottom)| {
                 (
-                    left + cfg.window.caret_offset_x,
-                    bottom + cfg.window.caret_offset_y,
+                    left + cfg.style.layout.caret_offset_x,
+                    bottom + cfg.style.layout.caret_offset_y,
                 )
             })
             .unwrap_or_else(|| {
                 tsf_log("[CheIME] GetTextExt failed, using config offsets");
-                (cfg.window.caret_offset_x, cfg.window.caret_offset_y)
+                (
+                    cfg.style.layout.caret_offset_x,
+                    cfg.style.layout.caret_offset_y,
+                )
             });
 
         unsafe {
@@ -528,7 +633,12 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 window_height,
                 SWP_NOACTIVATE,
             );
-            apply_corner_radius(hwnd, window_width, window_height, cfg.window.corner_radius);
+            apply_corner_radius(
+                hwnd,
+                window_width,
+                window_height,
+                cfg.style.layout.corner_radius,
+            );
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_ERASE);
         }
@@ -688,9 +798,11 @@ fn handle_mouse_leave(hwnd: HWND, ctx: Option<&WindowContext>) -> LRESULT {
 
 // Fix 3: accept cached font handle; no longer creates a font per paint call.
 unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
-    let fg = parse_hex(&config.theme.colors.candidate_text)
+    let scheme = config.active_scheme(crate::ui_settings::system_uses_dark_theme());
+    let fg = parse_hex(&scheme.candidate_text_color)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
-    let outline = parse_hex(&config.selection_box.outline_color)
+    let selected_fg = parse_hex(&scheme.hilited_candidate_text_color).unwrap_or(fg);
+    let selected_bg = parse_hex(&scheme.hilited_candidate_back_color)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
 
     let old = unsafe { SelectObject(hdc, font) };
@@ -698,9 +810,9 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
     for row in rows {
         unsafe {
             if row.highlighted {
-                draw_selection_box(hdc, row, config, outline);
+                draw_selection_box(hdc, row, config, selected_bg);
             }
-            SetTextColor(hdc, fg);
+            SetTextColor(hdc, if row.highlighted { selected_fg } else { fg });
             SetBkMode(hdc, TRANSPARENT);
             let _ = TextOutW(hdc, row.x, row.y, &row.text);
         }
@@ -717,17 +829,42 @@ fn build_rows(
     snapshot: &CandidateSnapshot,
     line_height: i32,
     char_width: i32,
-    config: &cheime_tip_core::ui_config::CandidateConfig,
+    config: &StyleConfig,
 ) -> (Vec<RowRender>, i32, i32) {
     let mut rows = Vec::new();
-    let pad_x = config.row_padding_x.max(0);
-    let pad_y = config.row_padding_y.max(0);
+    let pad_x = config.layout.margin_x.max(0);
+    let pad_y = config.layout.margin_y.max(0);
     let mut y = pad_y;
 
-    if !snapshot.preedit.is_empty() {
-        let width = text_pixel_width(&snapshot.preedit, char_width);
+    let preedit = if config.inline_preedit {
+        String::new()
+    } else {
+        match config.preedit_type {
+            PreeditType::Composition => snapshot.preedit.clone(),
+            PreeditType::Preview => snapshot
+                .highlighted
+                .and_then(|id| {
+                    snapshot
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.id == id)
+                })
+                .map(|candidate| candidate.text.clone())
+                .unwrap_or_else(|| snapshot.preedit.clone()),
+            PreeditType::PreviewAll => snapshot
+                .candidates
+                .iter()
+                .take(config.page_size.max(1))
+                .map(|candidate| candidate.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    };
+
+    if !preedit.is_empty() {
+        let width = text_pixel_width(&preedit, char_width);
         rows.push(RowRender {
-            text: snapshot.preedit.encode_utf16().collect(),
+            text: preedit.encode_utf16().collect(),
             x: pad_x,
             y,
             bounds: RECT {
@@ -739,7 +876,7 @@ fn build_rows(
             candidate_index: None,
             highlighted: false,
         });
-        y += line_height;
+        y += line_height + config.layout.spacing.max(0);
     }
 
     let candidates = snapshot
@@ -750,11 +887,29 @@ fn build_rows(
         .map(|(index, candidate)| {
             let mut text = String::new();
             use std::fmt::Write;
+            if snapshot.highlighted == Some(candidate.id) && !config.mark_text.is_empty() {
+                text.push_str(&config.mark_text);
+                text.push(' ');
+            }
             if config.show_labels {
                 let label = if index == 9 { 0 } else { index + 1 };
-                let _ = write!(text, "{label}. ");
+                text.push_str(&config.label_format.replace("%s", &label.to_string()));
+                text.push(' ');
             }
-            text.push_str(&candidate.text);
+            let candidate_text = if config.candidate_abbreviate_length > 0
+                && candidate.text.chars().count() > config.candidate_abbreviate_length
+            {
+                let mut shortened = candidate
+                    .text
+                    .chars()
+                    .take(config.candidate_abbreviate_length)
+                    .collect::<String>();
+                shortened.push('…');
+                shortened
+            } else {
+                candidate.text.clone()
+            };
+            text.push_str(&candidate_text);
             if let Some(annotation) = &candidate.annotation {
                 let _ = write!(text, " {annotation}");
             }
@@ -762,8 +917,8 @@ fn build_rows(
         })
         .collect::<Vec<_>>();
 
-    match config.orientation {
-        CandidateOrientation::Vertical => {
+    match config.layout.r#type {
+        LayoutType::Vertical => {
             for (index, candidate, text) in candidates {
                 let width = text_pixel_width(&text, char_width);
                 rows.push(RowRender {
@@ -779,17 +934,17 @@ fn build_rows(
                     candidate_index: Some(index),
                     highlighted: snapshot.highlighted == Some(candidate.id),
                 });
-                y += line_height;
+                y += line_height + config.layout.candidate_spacing.max(0);
             }
         }
-        CandidateOrientation::Horizontal => {
+        LayoutType::Horizontal => {
             let mut x = 0;
             for (index, candidate, text) in candidates {
                 let width = text_pixel_width(&text, char_width);
-                let right = x + width + pad_x * 2;
+                let right = x + width + config.layout.hilite_padding_x.max(0) * 2;
                 rows.push(RowRender {
                     text: text.encode_utf16().collect(),
-                    x: x + pad_x,
+                    x: x + config.layout.hilite_padding_x.max(0),
                     y,
                     bounds: RECT {
                         left: x,
@@ -800,7 +955,7 @@ fn build_rows(
                     candidate_index: Some(index),
                     highlighted: snapshot.highlighted == Some(candidate.id),
                 });
-                x = right;
+                x = right + config.layout.candidate_spacing.max(0);
             }
             if rows.iter().any(|row| row.candidate_index.is_some()) {
                 y += line_height;
@@ -831,64 +986,120 @@ fn text_pixel_width(text: &str, char_width: i32) -> i32 {
 }
 
 unsafe fn draw_selection_box(hdc: HDC, row: &RowRender, config: &UiConfig, outline: COLORREF) {
-    let Some(bounds) = scaled_selection_bounds(row.bounds, config.selection_box.relative_size)
-    else {
-        return;
-    };
-    let configured_radius = config
-        .selection_box
-        .corner_radius
-        .unwrap_or(config.window.corner_radius);
+    let bounds = row.bounds;
+    let configured_radius = config.style.layout.hilited_corner_radius;
     let radius = clamped_corner_radius(
         bounds.right - bounds.left,
         bounds.bottom - bounds.top,
         configured_radius,
     );
-    let region = if radius == 0 {
-        unsafe { CreateRectRgn(bounds.left, bounds.top, bounds.right, bounds.bottom) }
-    } else {
-        unsafe {
-            CreateRoundRectRgn(
-                bounds.left,
-                bounds.top,
-                bounds.right,
-                bounds.bottom,
-                radius * 2,
-                radius * 2,
-            )
+    with_antialiased_graphics(hdc, |graphics| unsafe {
+        let path = rounded_path(bounds, radius);
+        if path.is_null() {
+            return;
         }
-    };
-    if !region.is_invalid() {
-        let brush = unsafe { CreateSolidBrush(outline) };
-        unsafe {
-            let _ = FrameRgn(hdc, region, brush, 1, 1);
-            let _ = DeleteObject(brush);
-            let _ = DeleteObject(region);
+        let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+        if GdipCreateSolidFill(colorref_to_argb(outline), &mut brush).0 == 0 {
+            let _ = GdipFillPath(graphics, brush.cast::<GpBrush>(), path);
+            let _ = GdipDeleteBrush(brush.cast::<GpBrush>());
         }
+        let _ = GdipDeletePath(path);
+    });
+}
+
+fn ensure_gdiplus() {
+    START_GDIPLUS.call_once(|| {
+        let mut token = 0usize;
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
+        }
+        // GDI+ intentionally remains initialized for the lifetime of the TIP DLL.
+    });
+}
+
+fn with_antialiased_graphics(hdc: HDC, draw: impl FnOnce(*mut GpGraphics)) {
+    ensure_gdiplus();
+    let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+    unsafe {
+        if GdipCreateFromHDC(hdc, &mut graphics).0 != 0 || graphics.is_null() {
+            return;
+        }
+        let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias8x8);
+        draw(graphics);
+        let _ = GdipDeleteGraphics(graphics);
     }
 }
 
-fn scaled_selection_bounds(bounds: RECT, configured_size: f32) -> Option<RECT> {
-    let scale = if configured_size.is_finite() {
-        configured_size.clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    if scale == 0.0 {
-        return None;
+unsafe fn rounded_path(bounds: RECT, radius: i32) -> *mut GpPath {
+    let mut path: *mut GpPath = std::ptr::null_mut();
+    if unsafe { GdipCreatePath(FillModeAlternate, &mut path) }.0 != 0 {
+        return std::ptr::null_mut();
     }
     let width = (bounds.right - bounds.left).max(1);
     let height = (bounds.bottom - bounds.top).max(1);
-    let scaled_width = ((width as f32 * scale).round() as i32).max(1);
-    let scaled_height = ((height as f32 * scale).round() as i32).max(1);
-    let left = bounds.left + (width - scaled_width) / 2;
-    let top = bounds.top + (height - scaled_height) / 2;
-    Some(RECT {
-        left,
-        top,
-        right: left + scaled_width,
-        bottom: top + scaled_height,
-    })
+    let diameter = (radius.max(0) * 2).min(width).min(height);
+    if diameter == 0 {
+        unsafe {
+            let _ = GdipAddPathArcI(path, bounds.left, bounds.top, 1, 1, 0.0, 90.0);
+            let _ = GdipAddPathArcI(path, bounds.right - 1, bounds.top, 1, 1, 90.0, 90.0);
+            let _ = GdipAddPathArcI(path, bounds.right - 1, bounds.bottom - 1, 1, 1, 180.0, 90.0);
+            let _ = GdipAddPathArcI(path, bounds.left, bounds.bottom - 1, 1, 1, 270.0, 90.0);
+        }
+    } else {
+        unsafe {
+            let _ = GdipAddPathArcI(
+                path,
+                bounds.left,
+                bounds.top,
+                diameter,
+                diameter,
+                180.0,
+                90.0,
+            );
+            let _ = GdipAddPathArcI(
+                path,
+                bounds.right - diameter,
+                bounds.top,
+                diameter,
+                diameter,
+                270.0,
+                90.0,
+            );
+            let _ = GdipAddPathArcI(
+                path,
+                bounds.right - diameter,
+                bounds.bottom - diameter,
+                diameter,
+                diameter,
+                0.0,
+                90.0,
+            );
+            let _ = GdipAddPathArcI(
+                path,
+                bounds.left,
+                bounds.bottom - diameter,
+                diameter,
+                diameter,
+                90.0,
+                90.0,
+            );
+        }
+    }
+    unsafe {
+        let _ = GdipClosePathFigure(path);
+    }
+    path
+}
+
+fn colorref_to_argb(color: COLORREF) -> u32 {
+    let red = color.0 & 0xff;
+    let green = (color.0 >> 8) & 0xff;
+    let blue = (color.0 >> 16) & 0xff;
+    0xff00_0000 | (red << 16) | (green << 8) | blue
 }
 
 unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_radius: i32) {
@@ -914,23 +1125,14 @@ fn clamped_corner_radius(width: i32, height: i32, configured_radius: i32) -> i32
 
 // ── Color helpers ─────────────────────────────────────────────────────
 
-/// Parse a CSS hex color like "#1e1e2e" or "#fff" into a COLORREF (0x00BBGGRR).
+/// Parse a CSS-style `#RRGGBB` color into Windows' native COLORREF.
 fn parse_hex(s: &str) -> Option<COLORREF> {
     let hex = s.strip_prefix('#')?;
-    let (r, g, b) = match hex.len() {
-        6 => {
-            let n = u32::from_str_radix(hex, 16).ok()?;
-            ((n >> 16) as u8, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8)
-        }
-        3 => {
-            let n = u32::from_str_radix(hex, 16).ok()?;
-            let r = ((n >> 8) & 0xf) as u8;
-            let g = ((n >> 4) & 0xf) as u8;
-            let b = (n & 0xf) as u8;
-            (r * 17, g * 17, b * 17)
-        }
-        _ => return None,
-    };
+    if hex.len() != 6 {
+        return None;
+    }
+    let n = u32::from_str_radix(hex, 16).ok()?;
+    let (r, g, b) = ((n >> 16) as u8, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8);
     Some(COLORREF(
         (r as u32) | ((g as u32) << 8) | ((b as u32) << 16),
     ))
@@ -1056,9 +1258,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_hex_3_digit() {
-        let c = parse_hex("#fff").unwrap();
-        assert_eq!(c.0, 0xffffff);
+    fn parse_hex_rejects_3_digit_shorthand() {
+        assert!(parse_hex("#fff").is_none());
     }
 
     #[test]
@@ -1098,7 +1299,7 @@ mod tests {
             highlighted: Some(CandidateId::new(1)),
             status: SessionStatus::Composing,
         };
-        let cfg = cheime_tip_core::ui_config::CandidateConfig::default();
+        let cfg = StyleConfig::default();
         let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
         assert!(rows.len() >= 2, "preedit + at least 1 candidate");
         // First row = preedit, not highlighted
@@ -1130,8 +1331,11 @@ mod tests {
             highlighted: Some(CandidateId::new(1)),
             status: SessionStatus::Composing,
         };
-        let cfg = cheime_tip_core::ui_config::CandidateConfig {
-            orientation: CandidateOrientation::Horizontal,
+        let cfg = StyleConfig {
+            layout: cheime_tip_core::ui_config::LayoutConfig {
+                r#type: LayoutType::Horizontal,
+                ..Default::default()
+            },
             show_labels: false,
             page_size: 2,
             ..Default::default()
@@ -1147,33 +1351,33 @@ mod tests {
         assert_eq!(candidates[0].bounds.right - candidates[0].bounds.left, 45);
         assert!(!String::from_utf16_lossy(&candidates[0].text).contains("1."));
         assert!(width > 0);
-        assert_eq!(height, 48);
+        assert_eq!(height, 66);
+    }
+
+    #[test]
+    fn inline_preedit_removes_candidate_window_preedit_row() {
+        use cheime_model::{DeploymentGeneration, Revision, SessionEpoch, SessionStatus};
+        let snap = CandidateSnapshot {
+            epoch: SessionEpoch::new(1),
+            revision: Revision::new(1),
+            deployment: DeploymentGeneration::new(1),
+            page: 0,
+            page_size: 5,
+            preedit: "nihao".into(),
+            cursor: 5,
+            candidates: vec![],
+            highlighted: None,
+            status: SessionStatus::Composing,
+        };
+        let mut cfg = StyleConfig::default();
+        cfg.inline_preedit = true;
+        let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
+        assert!(rows.iter().all(|row| row.candidate_index.is_some()));
     }
 
     #[test]
     fn corner_radius_is_clamped_to_half_height() {
         assert_eq!(clamped_corner_radius(300, 40, 100), 20);
         assert_eq!(clamped_corner_radius(300, 40, -1), 0);
-    }
-
-    #[test]
-    fn selection_box_relative_size_is_centered_and_clamped() {
-        let bounds = RECT {
-            left: 10,
-            top: 20,
-            right: 110,
-            bottom: 60,
-        };
-        assert_eq!(
-            scaled_selection_bounds(bounds, 0.5),
-            Some(RECT {
-                left: 35,
-                top: 30,
-                right: 85,
-                bottom: 50,
-            })
-        );
-        assert_eq!(scaled_selection_bounds(bounds, 0.0), None);
-        assert_eq!(scaled_selection_bounds(bounds, 2.0), Some(bounds));
     }
 }

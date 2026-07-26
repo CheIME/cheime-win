@@ -1,0 +1,19 @@
+[package]
+name = "cheime-ui-configurator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cheime-ui"
+path = "src/main.rs"
+
+[dependencies]
+cheime-tip-core = { path = "../cheime-tip-core" }
+serde_json.workspace = true
+serde_yaml.workspace = true
+windows.workspace = true
+winit = "0.30.12"
+wry = "0.55.1"

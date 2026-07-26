@@ -5,6 +5,7 @@ members = [
     "crates/cheime-engine-host",
     "crates/cheime-installer",
     "crates/cheime-probe",
+    "crates/cheime-ui-configurator",
 ]
 resolver = "3"
 
@@ -58,5 +59,6 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
 ]}
 windows-core = "0.58"

@@ -47,6 +47,7 @@ if ($LASTEXITCODE -ne 0) { throw "build failed" }
 $releaseDir = Join-Path $repoRoot "target\release"
 $artifacts = @{
     "cheime-engine.exe"       = Join-Path $releaseDir "cheime-engine.exe"
+    "cheime-ui.exe"           = Join-Path $releaseDir "cheime-ui.exe"
     "cheime_tip.dll"          = Join-Path $releaseDir "cheime_tip.dll"
     "cheime-registered-probe.exe" = Join-Path $releaseDir "cheime-registered-probe.exe"
     "cheime-profile-probe.exe"    = Join-Path $releaseDir "cheime-profile-probe.exe"
@@ -74,6 +75,7 @@ New-Item -ItemType Directory -Force -Path $binDir, $dataDir, $configDir | Out-Nu
 
 # Copy binaries
 Copy-Item -Force (Join-Path $releaseDir "cheime-engine.exe")          (Join-Path $binDir "cheime-engine.exe")
+Copy-Item -Force (Join-Path $releaseDir "cheime-ui.exe")              (Join-Path $binDir "cheime-ui.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime_tip.dll")              (Join-Path $binDir "cheime-tip.dll")
 Copy-Item -Force (Join-Path $releaseDir "cheime-registered-probe.exe") (Join-Path $binDir "cheime-registered-probe.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime-profile-probe.exe")    (Join-Path $binDir "cheime-profile-probe.exe")
@@ -99,6 +101,7 @@ if (Test-Path (Join-Path $sandboxDir "CheIME.wsb.template")) {
 Write-Step "Verifying staged bundle"
 $stagedFiles = @(
     "bin\cheime-engine.exe",
+    "bin\cheime-ui.exe",
     "bin\cheime-tip.dll",
     "bin\cheime-registered-probe.exe",
     "bin\cheime-profile-probe.exe",

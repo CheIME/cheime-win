@@ -939,9 +939,67 @@ unsafe extern "system" fn key_down(
             if has_rollback_guard {
                 unsafe { disarm_rollback(owner, GuardEvent::Navigation) };
             }
+            if unsafe { (*owner).has_composition.get() } && dismisses_composition(key_code) {
+                if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
+                    if let Some(ref channel) = *channel {
+                        let _ = channel.try_send(FrontendMessage::UiCommand {
+                            header: cheime_protocol::MessageHeader {
+                                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                                client: cheime_model::ClientInstanceId::new(1),
+                                session: cheime_model::SessionId::new(1),
+                                epoch: cheime_model::SessionEpoch::new(1),
+                                sequence: cheime_model::Sequence::new(0),
+                                revision: cheime_model::Revision::new(0),
+                                deployment: cheime_model::DeploymentGeneration::new(1),
+                            },
+                            command: cheime_model::UiCommand::Dismiss,
+                        });
+                    }
+                }
+                if let Ok(candidate_window) = unsafe { (*owner).candidate_window.try_borrow() } {
+                    if let Some(candidate_window) = candidate_window.as_ref() {
+                        candidate_window.hide();
+                    }
+                }
+                unsafe { (*owner).has_composition.set(false) };
+                tsf_log(&format!(
+                    "[CheIME] dismissed composition for pass-through vk={key_code:#04x}"
+                ));
+            }
             unsafe { *eaten = BOOL(0) };
             S_OK
         }
+    }
+}
+
+fn dismisses_composition(key_code: u32) -> bool {
+    matches!(
+        key_code,
+        0x09 // Tab
+            | 0x23 // End
+            | 0x24 // Home
+            | 0x2D // Insert
+            | 0x2E // Delete
+            | 0x5B // Left Windows
+            | 0x5C // Right Windows
+            | 0x5D // Applications
+            | 0x70..=0x87 // F1-F24
+    )
+}
+
+#[cfg(test)]
+mod dismissal_tests {
+    use super::dismisses_composition;
+
+    #[test]
+    fn function_and_shell_keys_dismiss_composition() {
+        assert!(dismisses_composition(0x70));
+        assert!(dismisses_composition(0x7B));
+        assert!(dismisses_composition(0x09));
+        assert!(dismisses_composition(0x5B));
+        assert!(!dismisses_composition(0x41));
+        assert!(!dismisses_composition(0x20));
+        assert!(!dismisses_composition(0x25));
     }
 }
 

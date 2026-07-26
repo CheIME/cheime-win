@@ -18,8 +18,9 @@ Set-Location $projectRoot
 $releaseDir = Join-Path $projectRoot "target\release"
 
 $engineSource = Join-Path $releaseDir "cheime-engine.exe"
+$uiSource     = Join-Path $releaseDir "cheime-ui.exe"
 $dllSource    = Join-Path $releaseDir "cheime_tip.dll"
-foreach ($artifact in @($engineSource, $dllSource)) {
+foreach ($artifact in @($engineSource, $uiSource, $dllSource)) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "Build artifact not found: $artifact. Run 'scripts\build.ps1' first."
     }
@@ -32,6 +33,7 @@ $dataDir   = Join-Path $cheimeDir "data\dicts"
 $configDir = Join-Path $cheimeDir "config"
 New-Item -ItemType Directory -Force -Path $binDir, $dataDir, $configDir | Out-Null
 Copy-Item -Force $engineSource $binDir
+Copy-Item -Force $uiSource $binDir
 $dllPath = Join-Path $binDir "cheime-tip.dll"
 Copy-Item -Force $dllSource $dllPath
 Copy-Item -Force (Join-Path $projectRoot "assets\windows\*.ico") $binDir
@@ -66,4 +68,5 @@ if ($profileKey -ne $null) {
 Write-Host "  TIP registration verified" -ForegroundColor Green
 Write-Host "=== Installation complete ===" -ForegroundColor Cyan
 Write-Host "To start the engine: $binDir\cheime-engine.exe --dict-dir $dataDir"
+Write-Host "To edit the UI config: $binDir\cheime-ui.exe"
 Write-Host "To uninstall: .\scripts\uninstall.ps1"
