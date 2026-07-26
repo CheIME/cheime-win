@@ -1,0 +1,165 @@
+CheIME Engine Host v0.1.0
+Protocol version: 2
+Loading dictionaries from: C:\Users\15689\AppData\Local\CheIME\data\dicts
+Loaded 2453057 entries
+Starting named pipe server...
+[engine] connection 1 handshake complete
+[engine] connection 3 handshake complete
+[engine] connection 2 handshake complete
+[engine] connection 4 handshake complete
+[engine] connection 5 handshake complete
+[engine] connection 6 handshake complete
+[engine] connection 6 error: pipe error: pipe error: pipe disconnected
+[engine] connection 7 handshake complete
+[engine] connection 7 error: pipe error: pipe error: pipe disconnected
+[engine] connection 3 error: pipe error: pipe error: pipe disconnected
+[engine] connection 1 error: pipe error: pipe error: pipe disconnected
+[engine] connection 5 error: pipe error: pipe error: pipe disconnected
+[engine] connection 8 handshake complete
+[engine] connection 9 handshake complete
+[engine] connection 9 error: pipe error: pipe error: pipe disconnected
+[engine] connection 8 error: pipe error: pipe error: pipe disconnected
+[engine] connection 10 handshake complete
+[engine] connection 10 error: pipe error: pipe error: pipe disconnected
+[engine] connection 11 handshake complete
+[engine] connection 12 handshake complete
+[engine] connection 11 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 12 error: pipe error: pipe error: pipe disconnected
+[engine] connection 13 handshake complete
+[engine] connection 14 handshake complete
+[engine] connection 13 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 14 error: pipe error: session error: unsupported character '?'
+[engine] connection 15 handshake complete
+[engine] connection 15 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 16 handshake complete
+[engine] connection 17 handshake complete
+[engine] connection 18 handshake complete
+[engine] connection 17 error: pipe error: session error: unsupported character '?'
+[engine] connection 19 handshake complete
+[engine] connection 19 error: pipe error: session error: unsupported character '?'
+[engine] connection 20 handshake complete
+[engine] connection 20 error: pipe error: session error: unsupported character '?'
+[engine] connection 21 handshake complete
+[engine] connection 21 error: pipe error: session error: unsupported character '?'
+[engine] connection 22 handshake complete
+[engine] connection 22 error: pipe error: session error: unsupported character '?'
+[engine] connection 23 handshake complete
+[engine] connection 23 error: pipe error: session error: unsupported character '?'
+[engine] connection 24 handshake complete
+[engine] connection 24 error: pipe error: pipe error: pipe disconnected
+[engine] connection 16 error: pipe error: pipe error: pipe disconnected
+[engine] connection 18 error: pipe error: pipe error: pipe disconnected
+[engine] connection 25 handshake complete
+[engine] connection 26 handshake complete
+[engine] connection 25 error: pipe error: pipe error: pipe disconnected
+[engine] connection 27 handshake complete
+[engine] connection 28 handshake complete
+[engine] connection 28 error: pipe error: pipe error: pipe disconnected
+[engine] connection 27 error: pipe error: pipe error: pipe disconnected
+[engine] connection 26 error: pipe error: pipe error: pipe disconnected
+[engine] connection 29 handshake complete
+[engine] connection 30 handshake complete
+[engine] connection 31 handshake complete
+[engine] connection 31 error: pipe error: pipe error: pipe disconnected
+[engine] connection 29 error: pipe error: pipe error: pipe disconnected
+[engine] connection 30 error: pipe error: pipe error: pipe disconnected
+[engine] connection 32 handshake complete
+[engine] connection 33 handshake complete
+[engine] connection 34 handshake complete
+[engine] connection 35 handshake complete
+[engine] connection 35 error: pipe error: pipe error: pipe disconnected
+[engine] connection 34 error: pipe error: pipe error: pipe disconnected
+[engine] connection 32 error: pipe error: pipe error: pipe disconnected
+[engine] connection 36 handshake complete
+[engine] connection 37 handshake complete
+[engine] connection 38 handshake complete
+[engine] connection 37 error: pipe error: pipe error: pipe disconnected
+[engine] connection 36 error: pipe error: pipe error: pipe disconnected
+[engine] connection 38 error: pipe error: pipe error: pipe disconnected
+[engine] connection 39 handshake complete
+[engine] connection 39 error: pipe error: pipe error: pipe disconnected
+[engine] connection 40 handshake complete
+[engine] connection 41 handshake complete
+[engine] connection 42 handshake complete
+[engine] connection 43 handshake complete
+[engine] connection 43 error: pipe error: pipe error: pipe disconnected
+[engine] connection 44 handshake complete
+[engine] connection 40 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 41 error: pipe error: pipe error: pipe disconnected
+[engine] connection 44 error: pipe error: pipe error: pipe disconnected
+[engine] connection 42 error: pipe error: pipe error: pipe disconnected
+[engine] connection 33 error: pipe error: pipe error: pipe disconnected
+[engine] connection 45 handshake complete
+[engine] connection 45 error: pipe error: pipe error: pipe disconnected
+[engine] connection 46 handshake complete
+[engine] connection 47 handshake complete
+[engine] connection 48 handshake complete
+[engine] connection 48 error: pipe error: pipe error: pipe disconnected
+[engine] connection 49 handshake complete
+[engine] connection 50 handshake complete
+[engine] connection 50 error: pipe error: pipe error: pipe disconnected
+[engine] connection 46 error: pipe error: pipe error: pipe disconnected
+[engine] connection 49 error: pipe error: pipe error: pipe disconnected
+[engine] connection 51 handshake complete
+[engine] connection 52 handshake complete
+[engine] connection 53 handshake complete
+[engine] connection 53 error: pipe error: pipe error: pipe disconnected
+[engine] connection 51 error: pipe error: pipe error: pipe disconnected
+[engine] connection 52 error: pipe error: pipe error: pipe disconnected
+[engine] connection 54 handshake complete
+[engine] connection 55 handshake complete
+[engine] connection 56 handshake complete
+[engine] connection 57 handshake complete
+[engine] connection 57 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 55 error: pipe error: pipe error: pipe disconnected
+[engine] connection 47 error: pipe error: pipe error: pipe disconnected
+[engine] connection 54 error: pipe error: pipe error: pipe disconnected
+[engine] connection 58 handshake complete
+[engine] connection 59 handshake complete
+[engine] connection 58 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 60 handshake complete
+[engine] connection 61 handshake complete
+[engine] connection 61 error: pipe error: pipe error: pipe disconnected
+[engine] connection 59 error: pipe error: pipe error: pipe disconnected
+[engine] connection 56 error: pipe error: pipe error: pipe disconnected
+[engine] connection 62 handshake complete
+[engine] connection 63 handshake complete
+[engine] connection 64 handshake complete
+[engine] connection 64 error: pipe error: pipe error: pipe disconnected
+[engine] connection 62 error: pipe error: pipe error: pipe disconnected
+[engine] connection 60 error: pipe error: pipe error: pipe disconnected
+[engine] connection 65 handshake complete
+[engine] connection 66 handshake complete
+[engine] connection 67 handshake complete
+[engine] connection 67 error: pipe error: pipe error: pipe disconnected
+[engine] connection 63 error: pipe error: pipe error: pipe disconnected
+[engine] connection 66 error: pipe error: pipe error: pipe disconnected
+[engine] connection 65 error: pipe error: pipe error: pipe disconnected
+[engine] connection 68 handshake complete
+[engine] connection 68 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 69 handshake complete
+[engine] connection 69 error: pipe error: pipe error: pipe disconnected
+[engine] connection 70 handshake complete
+[engine] connection 71 handshake complete
+[engine] connection 72 handshake complete
+[engine] connection 71 error: pipe error: session error: unsupported character '?'
+[engine] connection 73 handshake complete
+[engine] connection 73 error: pipe error: session error: unsupported character '?'
+[engine] connection 74 handshake complete
+[engine] connection 74 error: pipe error: session error: unsupported character '?'
+[engine] connection 75 handshake complete
+[engine] connection 75 error: pipe error: session error: unsupported character '?'
+[engine] connection 76 handshake complete
+[engine] connection 76 error: pipe error: session error: unsupported character '?'
+[engine] connection 77 handshake complete
+[engine] connection 77 error: pipe error: session error: unsupported character '?'
+[engine] connection 78 handshake complete
+[engine] connection 78 error: pipe error: session error: unsupported character '?'
+[engine] connection 79 handshake complete
+[engine] connection 79 error: pipe error: session error: unsupported character '?'
+[engine] connection 80 handshake complete
+[engine] connection 80 error: pipe error: pipe error: pipe disconnected
+[engine] connection 72 error: pipe error: pipe error: pipe disconnected
+[engine] connection 70 error: pipe error: pipe error: pipe disconnected
+[engine] connection 81 handshake complete
+[engine] connection 81 error: pipe error: pipe error: pipe disconnected

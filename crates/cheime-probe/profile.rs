@@ -1,4 +1,4 @@
-//! Process-scoped TSF profile activation probe.
+//! TSF profile activation probe.
 //!
 //! Activates the registered CheIME profile only for this disposable process,
 //! pumps a message loop briefly, then deactivates it. It does not affect Explorer
@@ -11,14 +11,15 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
-    ITfInputProcessorProfileMgr, TF_IPPMF_FORPROCESS, TF_PROFILETYPE_INPUTPROCESSOR,
+    ITfInputProcessorProfileMgr, ITfInputProcessorProfiles, TF_IPPMF_FORPROCESS,
+    TF_IPPMF_FORSESSION, TF_PROFILETYPE_INPUTPROCESSOR,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostQuitMessage,
     RegisterClassW, SetTimer, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY,
     WM_TIMER, WNDCLASSW,
 };
-use windows::core::{GUID, w};
+use windows::core::{GUID, Interface, w};
 
 const CLSID_CHEIME_TIP: GUID = GUID::from_u128(0xB5F1C9A8_3E7D_4A15_AE2D_F89C1B6E3A07);
 const GUID_PROFILE: GUID = GUID::from_u128(0xD7E2A3B4_C5F6_7890_ABCD_EF1234567890);
@@ -91,7 +92,27 @@ fn main() -> windows::core::Result<()> {
     let manager: ITfInputProcessorProfileMgr =
         unsafe { CoCreateInstance(&CLSID_TF_INPUTPROCESSORPROFILES, None, CLSCTX_INPROC_SERVER)? };
 
-    eprintln!("[profile-probe] Activating CheIME profile FORPROCESS");
+    let for_session = std::env::args().any(|arg| arg == "--session");
+    if for_session {
+        eprintln!("[profile-probe] Enabling CheIME profile for current user");
+        let profiles: ITfInputProcessorProfiles = manager.cast()?;
+        unsafe {
+            profiles.EnableLanguageProfile(&CLSID_CHEIME_TIP, LANGID_ZH_CN, &GUID_PROFILE, true)?
+        };
+    }
+    let flags = if for_session {
+        TF_IPPMF_FORSESSION
+    } else {
+        TF_IPPMF_FORPROCESS
+    };
+    eprintln!(
+        "[profile-probe] Activating CheIME profile {}",
+        if for_session {
+            "FORSESSION"
+        } else {
+            "FORPROCESS"
+        }
+    );
     unsafe {
         manager.ActivateProfile(
             TF_PROFILETYPE_INPUTPROCESSOR,
@@ -99,7 +120,7 @@ fn main() -> windows::core::Result<()> {
             &CLSID_CHEIME_TIP,
             &GUID_PROFILE,
             HKL(std::ptr::null_mut()),
-            TF_IPPMF_FORPROCESS,
+            flags,
         )?
     };
 
@@ -112,18 +133,27 @@ fn main() -> windows::core::Result<()> {
         }
     }
 
-    eprintln!("[profile-probe] Deactivating CheIME profile FORPROCESS");
-    unsafe {
-        manager.DeactivateProfile(
-            TF_PROFILETYPE_INPUTPROCESSOR,
-            LANGID_ZH_CN,
-            &CLSID_CHEIME_TIP,
-            &GUID_PROFILE,
-            HKL(std::ptr::null_mut()),
-            TF_IPPMF_FORPROCESS,
-        )?
-    };
+    if !for_session {
+        eprintln!("[profile-probe] Deactivating CheIME profile FORPROCESS");
+        unsafe {
+            manager.DeactivateProfile(
+                TF_PROFILETYPE_INPUTPROCESSOR,
+                LANGID_ZH_CN,
+                &CLSID_CHEIME_TIP,
+                &GUID_PROFILE,
+                HKL(std::ptr::null_mut()),
+                flags,
+            )?
+        };
+    }
 
-    eprintln!("PROCESS-SCOPED PROFILE PROBE PASSED");
+    eprintln!(
+        "{} PROFILE ACTIVATION PASSED",
+        if for_session {
+            "SESSION-SCOPED"
+        } else {
+            "PROCESS-SCOPED"
+        }
+    );
     Ok(())
 }
