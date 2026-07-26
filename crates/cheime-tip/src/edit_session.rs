@@ -15,10 +15,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::BOOL;
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
-    ITfEditSession_Vtbl, TF_ANCHOR_END, TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS,
-    TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC, TF_SELECTION,
+    CLSID_TF_CategoryMgr, GUID_PROP_ATTRIBUTE, ITfCategoryMgr, ITfComposition, ITfCompositionSink,
+    ITfContext, ITfContextComposition, ITfEditSession, ITfEditSession_Vtbl, TF_ANCHOR_END,
+    TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_DEFAULT_SELECTION, TF_ES_READWRITE,
+    TF_ES_SYNC, TF_SELECTION,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -302,9 +304,15 @@ fn handle_set_preedit(
         };
 
         // Set the preedit text into the composition range.
-        let text_wide: Vec<u16> = text.encode_utf16().collect();
+        let display_text = format_inline_pinyin(text);
+        let text_wide: Vec<u16> = display_text.encode_utf16().collect();
         if unsafe { range.SetText(ec, 0, &text_wide) }.is_err() {
             break 'work Err("SetText failed".into());
+        }
+        if let Err(error) = apply_preedit_display_attribute(ec, context, &range) {
+            tsf_log(&format!(
+                "[CheIME] SetPreedit: display attribute failed: {error}"
+            ));
         }
         let _ = unsafe { range.Collapse(ec, TF_ANCHOR_END) };
 
@@ -313,6 +321,84 @@ fn handle_set_preedit(
 
     send_result(action, channel_ptr, &result);
     S_OK
+}
+
+fn format_inline_pinyin(input: &str) -> String {
+    if input.is_empty()
+        || input.contains('\'')
+        || !input.bytes().all(|byte| byte.is_ascii_lowercase())
+    {
+        return input.to_owned();
+    }
+    fn split_from(input: &str, start: usize, parts: &mut Vec<String>) -> bool {
+        if start == input.len() {
+            return true;
+        }
+        for end in (start + 1..=input.len()).rev() {
+            let syllable = &input[start..end];
+            if is_pinyin_syllable(syllable) {
+                parts.push(syllable.to_owned());
+                if split_from(input, end, parts) {
+                    return true;
+                }
+                parts.pop();
+            }
+        }
+        false
+    }
+    let mut parts = Vec::new();
+    if split_from(input, 0, &mut parts) && parts.len() > 1 {
+        parts.join("'")
+    } else {
+        input.to_owned()
+    }
+}
+
+fn is_pinyin_syllable(value: &str) -> bool {
+    const INITIALS: &[&str] = &[
+        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
+        "r", "z", "c", "s", "y", "w", "",
+    ];
+    const FINALS: &[&str] = &[
+        "iang", "iong", "uang", "ueng", "ang", "eng", "ing", "ong", "iao", "ian", "uan", "uai",
+        "uei", "uen", "van", "ve", "ai", "ei", "ao", "ou", "an", "en", "in", "un", "vn", "ia",
+        "ie", "ua", "uo", "ui", "iu", "er", "a", "o", "e", "i", "u", "v",
+    ];
+    INITIALS.iter().any(|initial| {
+        value
+            .strip_prefix(initial)
+            .is_some_and(|final_part| FINALS.contains(&final_part))
+    })
+}
+
+#[cfg(test)]
+mod inline_pinyin_tests {
+    use super::format_inline_pinyin;
+
+    #[test]
+    fn inserts_visible_syllable_boundaries() {
+        assert_eq!(format_inline_pinyin("nihao"), "ni'hao");
+        assert_eq!(format_inline_pinyin("zhongguo"), "zhong'guo");
+        assert_eq!(format_inline_pinyin("xian"), "xian");
+        assert_eq!(format_inline_pinyin("ni'hao"), "ni'hao");
+    }
+}
+
+fn apply_preedit_display_attribute(
+    ec: u32,
+    context: &ITfContext,
+    range: &windows::Win32::UI::TextServices::ITfRange,
+) -> Result<(), String> {
+    let category: ITfCategoryMgr =
+        unsafe { CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|error| format!("create category manager: {error}"))?;
+    let atom = unsafe { category.RegisterGUID(&crate::display_attribute::GUID_CHEIME_PREEDIT) }
+        .map_err(|error| format!("register display GUID: {error}"))?;
+    let property = unsafe { context.GetProperty(&GUID_PROP_ATTRIBUTE) }
+        .map_err(|error| format!("get attribute property: {error}"))?;
+    let value = windows::core::VARIANT::from(atom as i32);
+    unsafe { property.SetValue(ec, range, &value) }
+        .map_err(|error| format!("set attribute property: {error}"))
 }
 
 /// Handle `CancelComposition`: clear preedit text, then end the composition.

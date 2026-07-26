@@ -45,6 +45,12 @@ pub struct StyleConfig {
     #[serde(default)]
     pub preedit_type: PreeditType,
     #[serde(default)]
+    pub preedit_underline_style: UnderlineStyle,
+    #[serde(default)]
+    pub preedit_underline_bold: bool,
+    #[serde(default)]
+    pub preedit_background_enabled: bool,
+    #[serde(default)]
     pub antialias_mode: AntialiasMode,
     #[serde(default)]
     pub mark_text: String,
@@ -87,6 +93,14 @@ pub struct LayoutConfig {
     pub hilited_corner_radius: i32,
     #[serde(default = "border_width")]
     pub border_width: i32,
+    #[serde(default = "border_width")]
+    pub hilited_border_width: i32,
+    #[serde(default = "mark_width")]
+    pub mark_width: i32,
+    #[serde(default = "mark_height")]
+    pub mark_height: i32,
+    #[serde(default = "mark_gap")]
+    pub mark_gap: i32,
     #[serde(default)]
     pub shadow_radius: i32,
     #[serde(default)]
@@ -114,6 +128,17 @@ pub enum PreeditType {
     Composition,
     Preview,
     PreviewAll,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderlineStyle {
+    None,
+    Solid,
+    Dot,
+    #[default]
+    Dash,
+    Squiggle,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -157,10 +182,18 @@ pub struct ColorScheme {
     pub hilited_candidate_text_color: String,
     #[serde(default = "highlight")]
     pub hilited_candidate_back_color: String,
+    #[serde(default = "border")]
+    pub hilited_candidate_border_color: String,
     #[serde(default = "highlight")]
     pub hilited_mark_color: String,
     #[serde(default = "shadow")]
     pub shadow_color: String,
+    #[serde(default = "text")]
+    pub preedit_text_color: String,
+    #[serde(default = "background")]
+    pub preedit_back_color: String,
+    #[serde(default = "highlight")]
+    pub preedit_underline_color: String,
 }
 
 impl UiConfig {
@@ -197,7 +230,7 @@ impl UiConfig {
 }
 
 impl ColorScheme {
-    fn colors(&self) -> [(&'static str, &str); 10] {
+    fn colors(&self) -> [(&'static str, &str); 14] {
         [
             ("back_color", &self.back_color),
             ("border_color", &self.border_color),
@@ -213,8 +246,15 @@ impl ColorScheme {
                 "hilited_candidate_back_color",
                 &self.hilited_candidate_back_color,
             ),
+            (
+                "hilited_candidate_border_color",
+                &self.hilited_candidate_border_color,
+            ),
             ("hilited_mark_color", &self.hilited_mark_color),
             ("shadow_color", &self.shadow_color),
+            ("preedit_text_color", &self.preedit_text_color),
+            ("preedit_back_color", &self.preedit_back_color),
+            ("preedit_underline_color", &self.preedit_underline_color),
         ]
     }
 }
@@ -266,6 +306,9 @@ impl Default for StyleConfig {
             label_format: label_format(),
             inline_preedit: false,
             preedit_type: PreeditType::Composition,
+            preedit_underline_style: UnderlineStyle::Dash,
+            preedit_underline_bold: false,
+            preedit_background_enabled: false,
             antialias_mode: AntialiasMode::Default,
             mark_text: String::new(),
             hover_type: HoverType::None,
@@ -292,6 +335,10 @@ impl Default for LayoutConfig {
             corner_radius: corner_radius(),
             hilited_corner_radius: hilited_corner_radius(),
             border_width: border_width(),
+            hilited_border_width: border_width(),
+            mark_width: mark_width(),
+            mark_height: mark_height(),
+            mark_gap: mark_gap(),
             shadow_radius: 0,
             shadow_offset_x: 0,
             shadow_offset_y: caret_offset_y(),
@@ -313,8 +360,12 @@ impl Default for ColorScheme {
             label_color: label(),
             hilited_candidate_text_color: highlight_text(),
             hilited_candidate_back_color: highlight(),
+            hilited_candidate_border_color: border(),
             hilited_mark_color: highlight(),
             shadow_color: shadow(),
+            preedit_text_color: text(),
+            preedit_back_color: background(),
+            preedit_underline_color: highlight(),
         }
     }
 }
@@ -330,8 +381,12 @@ fn dark_colors() -> ColorScheme {
         label_color: "#9AA0A6".into(),
         hilited_candidate_text_color: "#FFFFFF".into(),
         hilited_candidate_back_color: "#3F6AE0".into(),
+        hilited_candidate_border_color: "#5F6368".into(),
         hilited_mark_color: "#8AB4F8".into(),
         shadow_color: "#111318".into(),
+        preedit_text_color: "#E8EAED".into(),
+        preedit_back_color: "#202124".into(),
+        preedit_underline_color: "#8AB4F8".into(),
     }
 }
 
@@ -391,6 +446,15 @@ fn hilited_corner_radius() -> i32 {
 }
 fn border_width() -> i32 {
     1
+}
+fn mark_width() -> i32 {
+    3
+}
+fn mark_height() -> i32 {
+    18
+}
+fn mark_gap() -> i32 {
+    6
 }
 fn caret_offset_y() -> i32 {
     8

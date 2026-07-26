@@ -56,6 +56,7 @@ pub fn tsf_log(msg: &str) {
 
 pub const S_OK: HRESULT = HRESULT(0);
 pub const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
+pub const E_INVALIDARG: HRESULT = HRESULT(0x8007_0057u32 as i32);
 pub const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
 pub const E_NOTIMPL: HRESULT = HRESULT(0x8000_4001u32 as i32);
 pub const E_UNEXPECTED: HRESULT = HRESULT(0x8000_FFFFu32 as i32);
@@ -1394,7 +1395,14 @@ unsafe extern "system" fn get_display(
         return E_POINTER;
     }
     unsafe { *out = null_mut() };
-    E_NOTIMPL
+    if unsafe { *guid } != crate::display_attribute::GUID_CHEIME_PREEDIT {
+        return E_INVALIDARG;
+    }
+    let info = crate::display_attribute::create_info();
+    unsafe {
+        *out = info.into_raw();
+    }
+    S_OK
 }
 
 static DISPLAY_VTBL: ITfDisplayAttributeProvider_Vtbl = ITfDisplayAttributeProvider_Vtbl {
@@ -1740,9 +1748,21 @@ mod tests {
         assert!(out.is_null());
         assert_eq!(
             unsafe { get_display(display, &IID_DA, &mut out) },
-            E_NOTIMPL
+            E_INVALIDARG
         );
         assert!(out.is_null());
+        assert_eq!(
+            unsafe {
+                get_display(
+                    display,
+                    &crate::display_attribute::GUID_CHEIME_PREEDIT,
+                    &mut out,
+                )
+            },
+            S_OK
+        );
+        assert!(!out.is_null());
+        assert_eq!(unsafe { release(out) }, 0);
         assert_eq!(unsafe { release(display) }, 0);
     }
 

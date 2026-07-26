@@ -23,9 +23,9 @@ use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
     ClientToScreen, CreateFontW, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush,
     DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor,
-    HBRUSH, HDC, HFONT, InvalidateRect, NONANTIALIASED_QUALITY,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject,
-    SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
+    HBRUSH, HDC, HFONT, InvalidateRect, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
@@ -804,13 +804,23 @@ unsafe fn paint(hdc: HDC, rows: &[RowRender], config: &UiConfig, font: HFONT) {
     let selected_fg = parse_hex(&scheme.hilited_candidate_text_color).unwrap_or(fg);
     let selected_bg = parse_hex(&scheme.hilited_candidate_back_color)
         .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
+    let selected_border = parse_hex(&scheme.hilited_candidate_border_color)
+        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
+    let selected_mark = parse_hex(&scheme.hilited_mark_color).unwrap_or(selected_bg);
 
     let old = unsafe { SelectObject(hdc, font) };
 
     for row in rows {
         unsafe {
             if row.highlighted {
-                draw_selection_box(hdc, row, config, selected_bg);
+                draw_selection_box(
+                    hdc,
+                    row,
+                    config,
+                    selected_bg,
+                    selected_border,
+                    selected_mark,
+                );
             }
             SetTextColor(hdc, if row.highlighted { selected_fg } else { fg });
             SetBkMode(hdc, TRANSPARENT);
@@ -921,18 +931,26 @@ fn build_rows(
         LayoutType::Vertical => {
             for (index, candidate, text) in candidates {
                 let width = text_pixel_width(&text, char_width);
+                let marked = snapshot.highlighted == Some(candidate.id);
+                let mark_inset = if marked && config.layout.mark_width > 0 {
+                    config.layout.mark_gap.max(0)
+                        + config.layout.mark_width.max(0)
+                        + config.layout.hilite_spacing.max(0)
+                } else {
+                    0
+                };
                 rows.push(RowRender {
                     text: text.encode_utf16().collect(),
-                    x: pad_x,
+                    x: pad_x + mark_inset,
                     y,
                     bounds: RECT {
                         left: 0,
                         top: y,
-                        right: width + pad_x * 2,
+                        right: width + pad_x * 2 + mark_inset,
                         bottom: y + line_height,
                     },
                     candidate_index: Some(index),
-                    highlighted: snapshot.highlighted == Some(candidate.id),
+                    highlighted: marked,
                 });
                 y += line_height + config.layout.candidate_spacing.max(0);
             }
@@ -941,10 +959,18 @@ fn build_rows(
             let mut x = 0;
             for (index, candidate, text) in candidates {
                 let width = text_pixel_width(&text, char_width);
-                let right = x + width + config.layout.hilite_padding_x.max(0) * 2;
+                let marked = snapshot.highlighted == Some(candidate.id);
+                let mark_inset = if marked && config.layout.mark_width > 0 {
+                    config.layout.mark_gap.max(0)
+                        + config.layout.mark_width.max(0)
+                        + config.layout.hilite_spacing.max(0)
+                } else {
+                    0
+                };
+                let right = x + width + config.layout.hilite_padding_x.max(0) * 2 + mark_inset;
                 rows.push(RowRender {
                     text: text.encode_utf16().collect(),
-                    x: x + config.layout.hilite_padding_x.max(0),
+                    x: x + config.layout.hilite_padding_x.max(0) + mark_inset,
                     y,
                     bounds: RECT {
                         left: x,
@@ -953,7 +979,7 @@ fn build_rows(
                         bottom: y + line_height,
                     },
                     candidate_index: Some(index),
-                    highlighted: snapshot.highlighted == Some(candidate.id),
+                    highlighted: marked,
                 });
                 x = right + config.layout.candidate_spacing.max(0);
             }
@@ -985,7 +1011,14 @@ fn text_pixel_width(text: &str, char_width: i32) -> i32 {
         .sum()
 }
 
-unsafe fn draw_selection_box(hdc: HDC, row: &RowRender, config: &UiConfig, outline: COLORREF) {
+unsafe fn draw_selection_box(
+    hdc: HDC,
+    row: &RowRender,
+    config: &UiConfig,
+    fill: COLORREF,
+    border: COLORREF,
+    mark: COLORREF,
+) {
     let bounds = row.bounds;
     let configured_radius = config.style.layout.hilited_corner_radius;
     let radius = clamped_corner_radius(
@@ -999,9 +1032,49 @@ unsafe fn draw_selection_box(hdc: HDC, row: &RowRender, config: &UiConfig, outli
             return;
         }
         let mut brush: *mut GpSolidFill = std::ptr::null_mut();
-        if GdipCreateSolidFill(colorref_to_argb(outline), &mut brush).0 == 0 {
+        if GdipCreateSolidFill(colorref_to_argb(fill), &mut brush).0 == 0 {
             let _ = GdipFillPath(graphics, brush.cast::<GpBrush>(), path);
             let _ = GdipDeleteBrush(brush.cast::<GpBrush>());
+        }
+        let border_width = config.style.layout.hilited_border_width.max(0);
+        if border_width > 0 {
+            let mut pen: *mut GpPen = std::ptr::null_mut();
+            if GdipCreatePen1(
+                colorref_to_argb(border),
+                border_width as f32,
+                UnitPixel,
+                &mut pen,
+            )
+            .0 == 0
+            {
+                let _ = GdipDrawPath(graphics, pen, path);
+                let _ = GdipDeletePen(pen);
+            }
+        }
+        let mark_width = config.style.layout.mark_width.max(0);
+        let mark_height = config
+            .style
+            .layout
+            .mark_height
+            .max(0)
+            .min(bounds.bottom - bounds.top);
+        if mark_width > 0 && mark_height > 0 {
+            let center_y = (bounds.top + bounds.bottom) / 2;
+            let mark_bounds = RECT {
+                left: bounds.left + config.style.layout.mark_gap.max(0),
+                top: center_y - mark_height / 2,
+                right: bounds.left + config.style.layout.mark_gap.max(0) + mark_width,
+                bottom: center_y + (mark_height + 1) / 2,
+            };
+            let mark_path = rounded_path(mark_bounds, mark_width / 2);
+            if !mark_path.is_null() {
+                let mut mark_brush: *mut GpSolidFill = std::ptr::null_mut();
+                if GdipCreateSolidFill(colorref_to_argb(mark), &mut mark_brush).0 == 0 {
+                    let _ = GdipFillPath(graphics, mark_brush.cast::<GpBrush>(), mark_path);
+                    let _ = GdipDeleteBrush(mark_brush.cast::<GpBrush>());
+                }
+                let _ = GdipDeletePath(mark_path);
+            }
         }
         let _ = GdipDeletePath(path);
     });
@@ -1348,7 +1421,7 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].bounds.top, candidates[1].bounds.top);
         assert!(candidates[1].bounds.left >= candidates[0].bounds.right);
-        assert_eq!(candidates[0].bounds.right - candidates[0].bounds.left, 45);
+        assert_eq!(candidates[0].bounds.right - candidates[0].bounds.left, 62);
         assert!(!String::from_utf16_lossy(&candidates[0].text).contains("1."));
         assert!(width > 0);
         assert_eq!(height, 66);
