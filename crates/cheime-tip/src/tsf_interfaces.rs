@@ -928,7 +928,42 @@ unsafe extern "system" fn key_down(
             }
             if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
                 if let Some(ref channel) = *channel {
-                    let key = vk_to_key(key_code);
+                    let navigation = match key_code {
+                        0x21 => Some(cheime_model::UiCommand::PreviousPage),
+                        0x22 => Some(cheime_model::UiCommand::NextPage),
+                        0x26 => Some(cheime_model::UiCommand::MoveHighlight(-1)),
+                        0x28 => Some(cheime_model::UiCommand::MoveHighlight(1)),
+                        _ => None,
+                    };
+                    if let Some(command) = navigation {
+                        tsf_log(&format!(
+                            "[CheIME] UiCommand sending vk={key_code:#04x} command={command:?}"
+                        ));
+                        let send_result = channel.try_send(FrontendMessage::UiCommand {
+                            header: cheime_protocol::MessageHeader {
+                                protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                                client: cheime_model::ClientInstanceId::new(1),
+                                session: cheime_model::SessionId::new(1),
+                                epoch: cheime_model::SessionEpoch::new(1),
+                                sequence: cheime_model::Sequence::new(0),
+                                revision: cheime_model::Revision::new(0),
+                                deployment: cheime_model::DeploymentGeneration::new(1),
+                            },
+                            command,
+                        });
+                        tsf_log(&format!(
+                            "[CheIME] UiCommand sent vk={key_code:#04x} result={send_result:?}"
+                        ));
+                        unsafe { *eaten = BOOL(1) };
+                        return S_OK;
+                    }
+                    let Some(key) = vk_to_key(key_code) else {
+                        tsf_log(&format!(
+                            "[CheIME] passing through unmapped handled key vk={key_code:#04x}"
+                        ));
+                        unsafe { *eaten = BOOL(0) };
+                        return S_OK;
+                    };
                     let state = KeyState {
                         shift: is_shift,
                         control: is_ctrl,
@@ -1057,27 +1092,47 @@ unsafe extern "system" fn key_up(
 }
 
 /// Convert a Windows virtual key code to a `Key` for protocol messages.
-fn vk_to_key(vk: u32) -> Key {
+fn vk_to_key(vk: u32) -> Option<Key> {
     match vk {
-        0x08 => Key::Backspace,
-        0x0D => Key::Enter,
-        0x1B => Key::Escape,
-        0x20 => Key::Space,
-        0x41..=0x5A => Key::Character(((vk - 0x41) as u8 + b'a') as char),
-        0x30..=0x39 => Key::Character(((vk - 0x30) as u8 + b'0') as char),
-        0x60..=0x69 => Key::Character(((vk - 0x60) as u8 + b'0') as char),
-        0xBC => Key::Character(','),
-        0xBE => Key::Character('.'),
-        0xBA => Key::Character(';'),
-        0xBF => Key::Character('/'),
-        0xBB => Key::Character('='),
-        0xBD => Key::Character('-'),
-        0xDB => Key::Character('['),
-        0xDD => Key::Character(']'),
-        0xDC => Key::Character('\\'),
-        0xC0 => Key::Character('`'),
-        0xDE => Key::Character('\''),
-        _ => Key::Character('?'),
+        0x08 => Some(Key::Backspace),
+        0x0D => Some(Key::Enter),
+        0x1B => Some(Key::Escape),
+        0x20 => Some(Key::Space),
+        0x41..=0x5A => Some(Key::Character(((vk - 0x41) as u8 + b'a') as char)),
+        0x30..=0x39 => Some(Key::Character(((vk - 0x30) as u8 + b'0') as char)),
+        0x60..=0x69 => Some(Key::Character(((vk - 0x60) as u8 + b'0') as char)),
+        0xBC => Some(Key::Character(',')),
+        0xBE => Some(Key::Character('.')),
+        0xBA => Some(Key::Character(';')),
+        0xBF => Some(Key::Character('/')),
+        0xBB => Some(Key::Character('=')),
+        0xBD => Some(Key::Character('-')),
+        0xDB => Some(Key::Character('[')),
+        0xDD => Some(Key::Character(']')),
+        0xDC => Some(Key::Character('\\')),
+        0xC0 => Some(Key::Character('`')),
+        0xDE => Some(Key::Character('\'')),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod virtual_key_tests {
+    use super::vk_to_key;
+    use cheime_model::Key;
+
+    #[test]
+    fn known_text_keys_map_to_protocol_keys() {
+        assert_eq!(vk_to_key(0x41), Some(Key::Character('a')));
+        assert_eq!(vk_to_key(0xDE), Some(Key::Character('\'')));
+        assert_eq!(vk_to_key(0x08), Some(Key::Backspace));
+    }
+
+    #[test]
+    fn navigation_and_unknown_keys_never_become_question_mark() {
+        for vk in [0x21, 0x22, 0x26, 0x28, 0x09, 0xFF] {
+            assert_eq!(vk_to_key(vk), None, "vk={vk:#04x}");
+        }
     }
 }
 unsafe extern "system" fn preserved_key(
