@@ -17,15 +17,16 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{
-    BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
-    ClientToScreen, CreateFontW, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush,
-    DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor,
-    HBRUSH, HDC, HFONT, InvalidateRect, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
-    TRANSPARENT, TextOutW,
+    AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+    BLENDFUNCTION, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateRectRgn, CreateRoundRectRgn,
+    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, InvalidateRect,
+    NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE,
+    RedrawWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
@@ -42,9 +43,10 @@ use windows::Win32::UI::TextServices::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetWindowLongPtrW, HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE,
-    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+    WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -84,6 +86,7 @@ pub struct WindowContext {
     pub channel: SyncSender<FrontendMessage>,
     pub composition: Mutex<Option<ITfComposition>>,
     pub composition_sink: *mut c_void,
+    pub shadow_hwnd: Cell<HWND>,
     pub rollback_guard: Mutex<RollbackGuard>,
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
     pub tip: *mut ComTip,
@@ -92,6 +95,12 @@ pub struct WindowContext {
 
 impl Drop for WindowContext {
     fn drop(&mut self) {
+        let shadow = self.shadow_hwnd.get();
+        if !shadow.is_invalid() {
+            unsafe {
+                let _ = DestroyWindow(shadow);
+            }
+        }
         if let Ok(state) = self.render.get_mut() {
             for font in [state.font, state.label_font, state.comment_font] {
                 if !font.is_invalid() {
@@ -199,6 +208,29 @@ impl CandidateWindow {
             return Err("CreateWindowExW failed".into());
         }
 
+        let shadow_hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST,
+                windows::core::PCWSTR::from_raw(class_wide.as_ptr()),
+                windows::core::w!("CheIME Shadow"),
+                WS_POPUP,
+                -1000,
+                -1000,
+                1,
+                1,
+                HWND(std::ptr::null_mut()),
+                HMENU(std::ptr::null_mut()),
+                HINSTANCE(hinst.0),
+                None,
+            )
+        }
+        .map_err(|e| format!("Create shadow window: {e}"))?;
+        ctx.shadow_hwnd.set(shadow_hwnd);
+
         let ctx_ptr = Box::into_raw(ctx);
         unsafe {
             SetWindowLongPtrW(
@@ -215,6 +247,9 @@ impl CandidateWindow {
     pub fn hide(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+            if !self.ctx_ptr.is_null() {
+                let _ = ShowWindow((*self.ctx_ptr).shadow_hwnd.get(), SW_HIDE);
+            }
         }
     }
     pub fn hwnd(&self) -> HWND {
@@ -251,6 +286,7 @@ impl CandidateWindow {
             channel,
             composition: Mutex::new(None),
             composition_sink,
+            shadow_hwnd: Cell::new(HWND(std::ptr::null_mut())),
             rollback_guard: Mutex::new(RollbackGuard::default()),
             rollback_anchor: Mutex::new(None),
             tip,
@@ -656,6 +692,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         if boxed.preedit.is_empty() {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
             }
             return LRESULT(0);
         }
@@ -681,6 +718,15 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             });
 
         unsafe {
+            update_shadow_window(
+                ctx.shadow_hwnd.get(),
+                x,
+                y,
+                window_width,
+                window_height,
+                cfg,
+                dark_mode,
+            );
             let _ = SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -705,6 +751,133 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         }
     }
     LRESULT(0)
+}
+
+unsafe fn update_shadow_window(
+    hwnd: HWND,
+    body_x: i32,
+    body_y: i32,
+    body_width: i32,
+    body_height: i32,
+    config: &UiConfig,
+    dark_mode: bool,
+) {
+    let blur = config.style.layout.shadow_radius.max(0);
+    if hwnd.is_invalid() || blur == 0 {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        return;
+    }
+
+    let extent = blur.saturating_mul(2).max(1);
+    let width = body_width.saturating_add(extent.saturating_mul(2)).max(1);
+    let height = body_height.saturating_add(extent.saturating_mul(2)).max(1);
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (width as u32)
+                .saturating_mul(height as u32)
+                .saturating_mul(4),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.is_invalid() {
+        return;
+    }
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let bitmap =
+        match unsafe { CreateDIBSection(dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) } {
+            Ok(bitmap) => bitmap,
+            Err(_) => {
+                unsafe {
+                    let _ = DeleteDC(dc);
+                }
+                return;
+            }
+        };
+    let old = unsafe { SelectObject(dc, bitmap) };
+    let scheme = config.active_scheme(dark_mode);
+    let color = parse_hex(&scheme.shadow_color).unwrap_or(COLORREF(0));
+    let red = (color.0 & 0xff) as u8;
+    let green = ((color.0 >> 8) & 0xff) as u8;
+    let blue = ((color.0 >> 16) & 0xff) as u8;
+    let corner = config.style.layout.corner_radius.max(0) as f32;
+    let sigma = (blur as f32 / 2.0).max(0.75);
+    let peak_alpha = 72.0f32;
+    let pixels =
+        unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), (width * height) as usize) };
+    let half_w = body_width as f32 / 2.0;
+    let half_h = body_height as f32 / 2.0;
+    let center_x = extent as f32 + half_w;
+    let center_y = extent as f32 + half_h;
+    for py in 0..height {
+        for px in 0..width {
+            let qx = ((px as f32 + 0.5 - center_x).abs() - (half_w - corner)).max(0.0);
+            let qy = ((py as f32 + 0.5 - center_y).abs() - (half_h - corner)).max(0.0);
+            let distance = (qx * qx + qy * qy).sqrt() - corner;
+            let outside = distance.max(0.0);
+            let alpha = (peak_alpha * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
+                .round()
+                .clamp(0.0, 255.0) as u32;
+            let premultiply = |channel: u8| (channel as u32 * alpha + 127) / 255;
+            pixels[(py * width + px) as usize] = (alpha << 24)
+                | (premultiply(red) << 16)
+                | (premultiply(green) << 8)
+                | premultiply(blue);
+        }
+    }
+
+    let destination = POINT {
+        x: body_x + config.style.layout.shadow_offset_x - extent,
+        y: body_y + config.style.layout.shadow_offset_y - extent,
+    };
+    let size = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let source = POINT::default();
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let _ = unsafe {
+        UpdateLayeredWindow(
+            hwnd,
+            None,
+            Some(&destination),
+            Some(&size),
+            dc,
+            Some(&source),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        )
+    };
+    unsafe {
+        let _ = SelectObject(dc, old);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(dc);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            destination.x,
+            destination.y,
+            width,
+            height,
+            SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
 }
 
 fn stretch_vertical_candidate_rows(rows: &mut [RowRender], window_width: i32, margin_x: i32) {
