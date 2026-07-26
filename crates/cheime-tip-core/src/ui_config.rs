@@ -69,6 +69,8 @@ pub struct StyleConfig {
 pub struct LayoutConfig {
     #[serde(default)]
     pub r#type: LayoutType,
+    #[serde(default)]
+    pub text_vertical_align: TextVerticalAlign,
     #[serde(default = "min_width")]
     pub min_width: i32,
     #[serde(default)]
@@ -119,6 +121,15 @@ pub enum LayoutType {
     Horizontal,
     #[default]
     Vertical,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextVerticalAlign {
+    Top,
+    #[default]
+    Center,
+    Bottom,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -323,6 +334,7 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             r#type: LayoutType::Vertical,
+            text_vertical_align: TextVerticalAlign::Center,
             min_width: min_width(),
             max_width: 0,
             margin_x: margin_x(),

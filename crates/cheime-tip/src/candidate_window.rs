@@ -9,7 +9,9 @@ use crate::rollback_guard::{GuardEvent, RollbackGuard};
 use crate::tsf_interfaces::{ComTip, tsf_log};
 use cheime_model::CandidateSnapshot;
 use cheime_protocol::FrontendMessage;
-use cheime_tip_core::ui_config::{AntialiasMode, LayoutType, PreeditType, StyleConfig, UiConfig};
+use cheime_tip_core::ui_config::{
+    AntialiasMode, LayoutType, PreeditType, StyleConfig, TextVerticalAlign, UiConfig,
+};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -24,9 +26,10 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen,
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateRectRgn, CreateRoundRectRgn,
     CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, HBRUSH, HDC, HFONT, InvalidateRect,
-    NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE,
-    RedrawWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
+    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT,
+    InvalidateRect, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE,
+    RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TEXTMETRICW,
+    TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
@@ -1056,15 +1059,29 @@ unsafe fn paint(
     let comment_color = parse_hex(&scheme.comment_text_color).unwrap_or(fg);
 
     let original = unsafe { SelectObject(hdc, font) };
+    let candidate_height = unsafe { gdi_font_height(hdc, font) };
+    let label_height = unsafe { gdi_font_height(hdc, label_font) };
+    let comment_height = unsafe { gdi_font_height(hdc, comment_font) };
 
     for row in rows {
-        let row_height = (row.bounds.bottom - row.bounds.top).max(1);
-        let candidate_y =
-            row.bounds.top + (row_height - font_pixel_height(config.style.font_point)).max(0) / 2;
-        let label_y = row.bounds.top
-            + (row_height - font_pixel_height(config.style.label_font_point)).max(0) / 2;
-        let comment_y = row.bounds.top
-            + (row_height - font_pixel_height(config.style.comment_font_point)).max(0) / 2;
+        let candidate_y = aligned_text_y(
+            row.bounds,
+            candidate_height,
+            config.style.layout.hilite_padding_y,
+            config.style.layout.text_vertical_align,
+        );
+        let label_y = aligned_text_y(
+            row.bounds,
+            label_height,
+            config.style.layout.hilite_padding_y,
+            config.style.layout.text_vertical_align,
+        );
+        let comment_y = aligned_text_y(
+            row.bounds,
+            comment_height,
+            config.style.layout.hilite_padding_y,
+            config.style.layout.text_vertical_align,
+        );
         unsafe {
             if row.highlighted {
                 draw_selection_box(
@@ -1123,6 +1140,35 @@ unsafe fn paint(
         }
     }
     // Do NOT delete the font — it is cached in WindowContext.
+}
+
+unsafe fn gdi_font_height(hdc: HDC, font: HFONT) -> i32 {
+    let previous = unsafe { SelectObject(hdc, font) };
+    let mut metrics = TEXTMETRICW::default();
+    let height = if unsafe { GetTextMetricsW(hdc, &mut metrics) }.as_bool() {
+        metrics.tmHeight.max(1)
+    } else {
+        1
+    };
+    if !previous.is_invalid() {
+        unsafe {
+            let _ = SelectObject(hdc, previous);
+        }
+    }
+    height
+}
+
+fn aligned_text_y(bounds: RECT, text_height: i32, padding: i32, align: TextVerticalAlign) -> i32 {
+    let padding = padding.max(0);
+    let top = bounds.top + padding;
+    let bottom = (bounds.bottom - padding - text_height).max(top);
+    match align {
+        TextVerticalAlign::Top => top,
+        TextVerticalAlign::Center => {
+            bounds.top + ((bounds.bottom - bounds.top - text_height).max(0) / 2)
+        }
+        TextVerticalAlign::Bottom => bottom,
+    }
 }
 
 fn build_rows(
@@ -1232,7 +1278,7 @@ fn build_rows(
             for (index, candidate, text, label, candidate_text, comment) in candidates {
                 let width = segmented_text_width(&label, &candidate_text, &comment, config);
                 let marked = snapshot.highlighted == Some(candidate.id);
-                let mark_inset = if marked && config.layout.mark_width > 0 {
+                let mark_inset = if config.layout.mark_width > 0 {
                     config.layout.mark_gap.max(0)
                         + config.layout.mark_width.max(0)
                         + config.layout.hilite_spacing.max(0)
@@ -1266,7 +1312,7 @@ fn build_rows(
             for (index, candidate, text, label, candidate_text, comment) in candidates {
                 let width = segmented_text_width(&label, &candidate_text, &comment, config);
                 let marked = snapshot.highlighted == Some(candidate.id);
-                let mark_inset = if marked && config.layout.mark_width > 0 {
+                let mark_inset = if config.layout.mark_width > 0 {
                     config.layout.mark_gap.max(0)
                         + config.layout.mark_width.max(0)
                         + config.layout.hilite_spacing.max(0)
