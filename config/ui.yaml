@@ -1,42 +1,42 @@
-# CheIME candidate-window appearance.
-# All colors are CSS-style #RRGGBB (red, green, blue), never Weasel's BGR.
+# CheIME Windows 11 style candidate-window preset.
+# Colors use CSS-style #RRGGBB (red, green, blue), never Weasel's #BBGGRR.
 
 style:
-  color_scheme: cheime_light
-  color_scheme_dark: cheime_dark
-  font_face: "Microsoft YaHei UI"
-  label_font_face: "Microsoft YaHei UI"
-  comment_font_face: "Microsoft YaHei UI"
-  font_point: 18
-  label_font_point: 13
-  comment_font_point: 13
+  color_scheme: windows_11_light
+  color_scheme_dark: windows_11_dark
+  font_face: "Segoe UI, Microsoft YaHei UI"
+  label_font_face: "Segoe UI, Microsoft YaHei UI"
+  comment_font_face: "Segoe UI, Microsoft YaHei UI"
+  font_point: 16
+  label_font_point: 12
+  comment_font_point: 12
   page_size: 5
   show_labels: true
   label_format: "%s"
-  inline_preedit: false
+  inline_preedit: true
   preedit_type: composition
   preedit_underline_style: dash
   preedit_underline_bold: false
   preedit_background_enabled: false
   antialias_mode: cleartype
   mark_text: ""
-  hover_type: none
+  hover_type: semi_hilite
   paging_on_scroll: true
   candidate_abbreviate_length: 0
 
   layout:
-    type: vertical
-    min_width: 280
-    max_width: 0
-    margin_x: 10
-    margin_y: 8
-    spacing: 6
+    type: horizontal
+    min_width: 320
+    max_width: 720
+    margin_x: 6
+    margin_y: 6
+    spacing: 4
     candidate_spacing: 4
-    hilite_spacing: 8
+    hilite_spacing: 6
     hilite_padding_x: 10
-    hilite_padding_y: 5
-    corner_radius: 10
-    hilited_corner_radius: 7
+    hilite_padding_y: 6
+    corner_radius: 8
+    hilited_corner_radius: 5
     border_width: 1
     hilited_border_width: 1
     mark_width: 3
@@ -44,41 +44,41 @@ style:
     mark_gap: 6
     shadow_radius: 0
     shadow_offset_x: 0
-    shadow_offset_y: 8
+    shadow_offset_y: 4
     caret_offset_x: 0
     caret_offset_y: 8
 
 preset_color_schemes:
-  cheime_light:
-    name: "澈 · 明"
+  windows_11_light:
+    name: "Windows 11 Light"
     back_color: "#FFFFFF"
-    border_color: "#E1E4E8"
-    text_color: "#1F2328"
-    candidate_text_color: "#1F2328"
-    comment_text_color: "#6E7781"
-    label_color: "#8C959F"
-    hilited_candidate_text_color: "#FFFFFF"
-    hilited_candidate_back_color: "#316DCA"
-    hilited_candidate_border_color: "#AEB4BC"
-    hilited_mark_color: "#316DCA"
-    shadow_color: "#8C959F"
-    preedit_text_color: "#1F2328"
+    border_color: "#D1D1D1"
+    text_color: "#1A1A1A"
+    candidate_text_color: "#1A1A1A"
+    comment_text_color: "#616161"
+    label_color: "#616161"
+    hilited_candidate_text_color: "#1A1A1A"
+    hilited_candidate_back_color: "#F2F2F2"
+    hilited_candidate_border_color: "#C8C8C8"
+    hilited_mark_color: "#0067C0"
+    shadow_color: "#000000"
+    preedit_text_color: "#1A1A1A"
     preedit_back_color: "#FFFFFF"
-    preedit_underline_color: "#316DCA"
+    preedit_underline_color: "#0067C0"
 
-  cheime_dark:
-    name: "澈 · 暗"
-    back_color: "#202124"
-    border_color: "#34363A"
-    text_color: "#E8EAED"
-    candidate_text_color: "#E8EAED"
-    comment_text_color: "#9AA0A6"
-    label_color: "#9AA0A6"
+  windows_11_dark:
+    name: "Windows 11 Dark"
+    back_color: "#2B2B2B"
+    border_color: "#4A4A4A"
+    text_color: "#FFFFFF"
+    candidate_text_color: "#FFFFFF"
+    comment_text_color: "#B8B8B8"
+    label_color: "#B8B8B8"
     hilited_candidate_text_color: "#FFFFFF"
-    hilited_candidate_back_color: "#3F6AE0"
-    hilited_candidate_border_color: "#5F6368"
-    hilited_mark_color: "#8AB4F8"
-    shadow_color: "#111318"
-    preedit_text_color: "#E8EAED"
-    preedit_back_color: "#202124"
-    preedit_underline_color: "#8AB4F8"
+    hilited_candidate_back_color: "#3A3A3A"
+    hilited_candidate_border_color: "#666666"
+    hilited_mark_color: "#60CDFF"
+    shadow_color: "#000000"
+    preedit_text_color: "#FFFFFF"
+    preedit_back_color: "#2B2B2B"
+    preedit_underline_color: "#60CDFF"
