@@ -243,12 +243,12 @@ fn handle_set_preedit(
 ) -> HRESULT {
     let result = 'work: {
         let composition_mutex = unsafe { &*composition_ptr };
-        let mut comp_guard = match composition_mutex.lock() {
-            Ok(g) => g,
+        let existing = match composition_mutex.lock() {
+            Ok(guard) => guard.as_ref().cloned(),
             Err(_) => break 'work Err("composition mutex poisoned".into()),
         };
 
-        let range = match comp_guard.as_ref() {
+        let range = match existing {
             // Active composition — get range from the composition object.
             Some(comp) => {
                 tsf_log("[CheIME] SetPreedit: reusing existing composition");
@@ -300,15 +300,22 @@ fn handle_set_preedit(
                 };
                 match unsafe { ctx_comp.StartComposition(ec, &cloned, Some(composition_sink)) } {
                     Ok(c) => {
-                        tsf_log(&format!(
-                            "[CheIME] SetPreedit: StartComposition OK, comp_is_some={}",
-                            true
-                        ));
-                        *comp_guard = Some(c);
+                        tsf_log("[CheIME] SetPreedit: StartComposition OK");
+                        let range = match unsafe { c.GetRange() } {
+                            Ok(range) => range,
+                            Err(error) => {
+                                let _ = unsafe { c.EndComposition(ec) };
+                                break 'work Err(format!("GetRange after start: {error}"));
+                            }
+                        };
+                        match composition_mutex.lock() {
+                            Ok(mut guard) => *guard = Some(c),
+                            Err(_) => break 'work Err("composition mutex poisoned".into()),
+                        }
+                        range
                     }
                     Err(e) => break 'work Err(format!("StartComposition: {e}")),
-                };
-                cloned
+                }
             }
         };
 
@@ -435,11 +442,10 @@ fn commit_active_composition(
     text: &str,
 ) -> Result<windows::Win32::UI::TextServices::ITfRange, String> {
     let comp_mutex = unsafe { &*composition_ptr };
-    let mut guard = comp_mutex
+    let composition = comp_mutex
         .lock()
-        .map_err(|_| "composition mutex poisoned".to_owned())?;
-    let composition = guard
-        .as_ref()
+        .map_err(|_| "composition mutex poisoned".to_owned())?
+        .take()
         .ok_or_else(|| "no active composition".to_owned())?;
     let range = unsafe { composition.GetRange() }.map_err(|error| format!("GetRange: {error}"))?;
     let text_wide: Vec<u16> = text.encode_utf16().collect();
@@ -450,7 +456,6 @@ fn commit_active_composition(
         .map_err(|error| format!("Collapse anchor: {error}"))?;
     unsafe { composition.EndComposition(ec) }
         .map_err(|error| format!("EndComposition: {error}"))?;
-    *guard = None;
     Ok(anchor)
 }
 
@@ -465,11 +470,11 @@ fn handle_cancel_composition(
 ) -> HRESULT {
     let result = 'work: {
         let comp_mutex = unsafe { &*composition_ptr };
-        let guard = match comp_mutex.lock() {
-            Ok(g) => g,
+        let composition = match comp_mutex.lock() {
+            Ok(mut guard) => guard.take(),
             Err(_) => break 'work Err("composition mutex poisoned".into()),
         };
-        if let Some(comp) = guard.as_ref() {
+        if let Some(comp) = composition {
             let range = match unsafe { comp.GetRange() } {
                 Ok(r) => r,
                 Err(e) => break 'work Err(format!("GetRange: {e}")),
@@ -478,17 +483,8 @@ fn handle_cancel_composition(
             if unsafe { range.SetText(ec, 0, &[]) }.is_err() {
                 break 'work Err("SetText (cancel) failed".into());
             }
-        }
-        drop(guard);
-        match end_active_composition(ec, composition_ptr) {
-            Ok(()) => {
-                tsf_log("[CheIME] handle_commit: end_active_composition OK");
-            }
-            Err(e) => {
-                tsf_log(&format!(
-                    "[CheIME] handle_commit: end_active_composition FAILED: {e}"
-                ));
-                break 'work Err(e);
+            if let Err(error) = unsafe { comp.EndComposition(ec) } {
+                break 'work Err(format!("EndComposition: {error}"));
             }
         }
         tsf_log("[CheIME] handle_commit SUCCESS");
@@ -661,11 +657,11 @@ fn end_active_composition(
     composition_ptr: *const Mutex<Option<ITfComposition>>,
 ) -> Result<(), String> {
     let comp_mutex = unsafe { &*composition_ptr };
-    let mut guard = match comp_mutex.lock() {
-        Ok(g) => g,
+    let composition = match comp_mutex.lock() {
+        Ok(mut guard) => guard.take(),
         Err(_) => return Err("composition mutex poisoned".into()),
     };
-    if let Some(comp) = guard.take() {
+    if let Some(comp) = composition {
         unsafe {
             comp.EndComposition(ec)
                 .map_err(|e| format!("EndComposition: {e}"))?;

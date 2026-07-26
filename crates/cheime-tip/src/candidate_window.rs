@@ -90,6 +90,7 @@ pub struct WindowContext {
     pub composition: Mutex<Option<ITfComposition>>,
     pub composition_sink: *mut c_void,
     pub shadow_hwnd: Cell<HWND>,
+    pub selection_gate: Mutex<Option<(cheime_model::SessionEpoch, cheime_model::Revision)>>,
     pub rollback_guard: Mutex<RollbackGuard>,
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
     pub tip: *mut ComTip,
@@ -290,6 +291,7 @@ impl CandidateWindow {
             composition: Mutex::new(None),
             composition_sink,
             shadow_hwnd: Cell::new(HWND(std::ptr::null_mut())),
+            selection_gate: Mutex::new(None),
             rollback_guard: Mutex::new(RollbackGuard::default()),
             rollback_anchor: Mutex::new(None),
             tip,
@@ -442,7 +444,7 @@ unsafe extern "system" fn candidate_window_proc(
             LRESULT(0)
         }
 
-        WM_LBUTTONDOWN => handle_click(lparam, ctx()),
+        WM_LBUTTONDOWN => handle_click(hwnd, lparam, ctx()),
 
         WM_MOUSEMOVE => handle_mouse_move(hwnd, lparam, ctx()),
 
@@ -667,6 +669,12 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             boxed.preedit,
             boxed.candidates.len()
         ));
+        if let Ok(mut gate) = ctx.selection_gate.lock() {
+            let identity = (boxed.epoch, boxed.revision);
+            if boxed.preedit.is_empty() || gate.is_some_and(|pending| pending != identity) {
+                *gate = None;
+            }
+        }
 
         let char_width = font_pixel_height(cfg.style.font_point);
         let content_height = font_pixel_height(cfg.style.font_point)
@@ -928,42 +936,67 @@ fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
 }
 
 // Fix 2: Single lock scope — eliminates TOCTOU race between hit_test and candidate lookup.
-fn handle_click(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
+fn handle_click(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     let x = (lparam.0 as u16) as i32;
     let y = ((lparam.0 >> 16) as u16) as i32;
 
-    if let Ok(guard) = ctx.snapshot.lock() {
-        if let Some((snap, rows)) = guard.as_ref() {
-            let hit_index = rows.iter().find_map(|row| {
-                let hit = x >= row.bounds.left
-                    && x < row.bounds.right
-                    && y >= row.bounds.top
-                    && y < row.bounds.bottom;
-                hit.then_some(row.candidate_index).flatten()
-            });
-            if let Some(idx) = hit_index {
-                let candidate = snap.candidates.get(idx);
-                if let Some(cand) = candidate {
-                    tsf_log(&format!("[CheIME] Click select: {}", cand.text));
-                    let _ = ctx.channel.try_send(FrontendMessage::UiCommand {
-                        header: cheime_protocol::MessageHeader {
-                            protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
-                            client: cheime_model::ClientInstanceId::new(1),
-                            session: cheime_model::SessionId::new(1),
-                            epoch: cheime_model::SessionEpoch::new(1),
-                            sequence: cheime_model::Sequence::new(0),
-                            revision: cheime_model::Revision::new(0),
-                            deployment: cheime_model::DeploymentGeneration::new(1),
-                        },
-                        command: cheime_model::UiCommand::SelectCandidate {
-                            epoch: snap.epoch,
-                            snapshot_revision: snap.revision,
-                            candidate_id: cand.id,
-                        },
-                    });
-                }
-            }
+    let selected = ctx.snapshot.lock().ok().and_then(|guard| {
+        let (snapshot, rows) = guard.as_ref()?;
+        let index = rows.iter().find_map(|row| {
+            let hit = x >= row.bounds.left
+                && x < row.bounds.right
+                && y >= row.bounds.top
+                && y < row.bounds.bottom;
+            hit.then_some(row.candidate_index).flatten()
+        })?;
+        let candidate = snapshot.candidates.get(index)?;
+        Some((
+            snapshot.epoch,
+            snapshot.revision,
+            candidate.id,
+            candidate.text.clone(),
+        ))
+    });
+    let Some((epoch, revision, candidate_id, text)) = selected else {
+        return LRESULT(0);
+    };
+    let identity = (epoch, revision);
+    if let Ok(mut gate) = ctx.selection_gate.lock() {
+        if gate.is_some() {
+            tsf_log("[CheIME] Click ignored: selection already in flight");
+            return LRESULT(0);
+        }
+        *gate = Some(identity);
+    } else {
+        return LRESULT(0);
+    }
+
+    tsf_log(&format!("[CheIME] Click select: {text}"));
+    let result = ctx.channel.try_send(FrontendMessage::UiCommand {
+        header: cheime_protocol::MessageHeader {
+            protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+            client: cheime_model::ClientInstanceId::new(1),
+            session: cheime_model::SessionId::new(1),
+            epoch: cheime_model::SessionEpoch::new(1),
+            sequence: cheime_model::Sequence::new(0),
+            revision: cheime_model::Revision::new(0),
+            deployment: cheime_model::DeploymentGeneration::new(1),
+        },
+        command: cheime_model::UiCommand::SelectCandidate {
+            epoch,
+            snapshot_revision: revision,
+            candidate_id,
+        },
+    });
+    if result.is_err() {
+        if let Ok(mut gate) = ctx.selection_gate.lock() {
+            *gate = None;
+        }
+    } else {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
         }
     }
     LRESULT(0)
