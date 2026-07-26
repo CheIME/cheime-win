@@ -176,6 +176,7 @@ pub struct LanguageBarRegistration {
     manager: ITfLangBarItemMgr,
     item: ITfLangBarItem,
     sink: Rc<RefCell<Option<ITfLangBarItemSink>>>,
+    dark_theme: Cell<bool>,
 }
 
 impl LanguageBarRegistration {
@@ -192,14 +193,22 @@ impl LanguageBarRegistration {
             manager,
             item,
             sink,
+            dark_theme: Cell::new(system_uses_dark_theme()),
         })
     }
 
     pub fn refresh(&self) {
+        self.dark_theme.set(system_uses_dark_theme());
         if let Some(sink) = self.sink.borrow().as_ref() {
             unsafe {
                 let _ = sink.OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP | TF_LBI_STATUS);
             }
+        }
+    }
+
+    pub fn refresh_theme_if_needed(&self) {
+        if self.dark_theme.get() != system_uses_dark_theme() {
+            self.refresh();
         }
     }
 }
@@ -214,21 +223,31 @@ impl Drop for LanguageBarRegistration {
 
 fn system_uses_dark_theme() -> bool {
     let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-    let name = wide("SystemUsesLightTheme");
-    let mut value = 1u32;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey.as_ptr()),
-            PCWSTR(name.as_ptr()),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&mut value as *mut u32).cast::<c_void>()),
-            Some(&mut size),
-        )
-    };
-    status.is_ok() && value == 0
+    // The language-bar indicator is normally rendered on the taskbar, so the
+    // system theme is authoritative. Some Windows configurations only persist
+    // the app-theme value; use it as a fallback instead of silently forcing a
+    // black icon.
+    for value_name in ["SystemUsesLightTheme", "AppsUseLightTheme"] {
+        let name = wide(value_name);
+        let mut value = 1u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(name.as_ptr()),
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&mut value as *mut u32).cast::<c_void>()),
+                Some(&mut size),
+            )
+        };
+        if status.is_ok() {
+            return value == 0;
+        }
+    }
+
+    false
 }
 
 fn module_sibling(name: &str) -> windows::core::Result<PathBuf> {
@@ -248,8 +267,16 @@ fn module_sibling(name: &str) -> windows::core::Result<PathBuf> {
         }
         if length < buffer.len() - 1 {
             let module_path = PathBuf::from(String::from_utf16_lossy(&buffer[..length]));
+            let sibling = module_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""))
+                .join(name);
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
             return Ok(module_path
                 .parent()
+                .and_then(std::path::Path::parent)
                 .unwrap_or_else(|| std::path::Path::new(""))
                 .join(name));
         }

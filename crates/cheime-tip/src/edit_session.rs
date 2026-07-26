@@ -46,6 +46,7 @@ struct EditSessionData {
     /// Raw pointer to the `Mutex<Option<ITfComposition>>` in `WindowContext`.
     /// Safe because the composition mutex outlives all queued edit sessions.
     composition: *const Mutex<Option<ITfComposition>>,
+    composition_sink: Option<*mut c_void>,
     guard: *const Mutex<RollbackGuard>,
     anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
 }
@@ -177,6 +178,8 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
                 *cursor,
                 data.channel,
                 data.composition,
+                data.composition_sink
+                    .expect("SetPreedit edit sessions always carry a composition sink"),
                 action,
             )
         }
@@ -227,6 +230,7 @@ fn handle_commit(ec: u32, data: &EditSessionData, text: &str, action: &PlatformA
 /// Handle `SetPreedit`: start (or re-use) a composition and set its range text.
 /// Uses the active composition range, or inserts at the cursor if no composition
 /// exists yet. Always sends a result so the engine doesn't accumulate pending resolves.
+#[allow(clippy::too_many_arguments)]
 fn handle_set_preedit(
     ec: u32,
     context: &ITfContext,
@@ -234,6 +238,7 @@ fn handle_set_preedit(
     _cursor: usize,
     channel_ptr: *const SyncSender<FrontendMessage>,
     composition_ptr: *const Mutex<Option<ITfComposition>>,
+    composition_sink: *mut c_void,
     action: &PlatformAction,
 ) -> HRESULT {
     let result = 'work: {
@@ -288,9 +293,12 @@ fn handle_set_preedit(
                     Ok(c) => c,
                     Err(_) => break 'work Err("cast to ITfContextComposition failed".into()),
                 };
-                match unsafe {
-                    ctx_comp.StartComposition(ec, &cloned, Option::<&ITfCompositionSink>::None)
-                } {
+                let Some(composition_sink) =
+                    (unsafe { ITfCompositionSink::from_raw_borrowed(&composition_sink) })
+                else {
+                    break 'work Err("invalid composition sink".into());
+                };
+                match unsafe { ctx_comp.StartComposition(ec, &cloned, Some(composition_sink)) } {
                     Ok(c) => {
                         tsf_log(&format!(
                             "[CheIME] SetPreedit: StartComposition OK, comp_is_some={}",
@@ -751,6 +759,7 @@ pub fn request_edit_session(
     commit_token: CommitToken,
     channel: *const SyncSender<FrontendMessage>,
     composition: *const Mutex<Option<ITfComposition>>,
+    composition_sink: *mut c_void,
     guard: *const Mutex<RollbackGuard>,
     anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
 ) {
@@ -763,6 +772,7 @@ pub fn request_edit_session(
         guarded_backspace: false,
         channel,
         composition,
+        composition_sink: Some(composition_sink),
         guard,
         anchor,
     };
@@ -825,6 +835,7 @@ pub unsafe fn request_guarded_backspace(
         guarded_backspace: true,
         channel,
         composition,
+        composition_sink: None,
         guard,
         anchor,
     };

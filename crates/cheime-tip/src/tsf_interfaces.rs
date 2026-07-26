@@ -157,6 +157,10 @@ impl ComTip {
         self.suppress_text_edit.set(suppress);
     }
 
+    pub(crate) fn composition_sink_ptr(&self) -> *mut c_void {
+        std::ptr::addr_of!(self.composition) as *mut c_void
+    }
+
     unsafe fn interface(owner: *mut Self, iid: &GUID) -> Option<*mut c_void> {
         if *iid == IUnknown::IID || *iid == IID_TIP || *iid == IID_TIP_EX {
             Some(unsafe { std::ptr::addr_of_mut!((*owner).primary).cast() })
@@ -541,8 +545,13 @@ unsafe extern "system" fn activate_ex(
     let mut channel = TipChannel::new(64);
     let receiver = channel.take_receiver();
     let channel_sender = channel.clone_sender();
-    let window_ctx =
-        CandidateWindow::new_context(manager_for_window.clone(), client_id, channel_sender, owner);
+    let window_ctx = CandidateWindow::new_context(
+        manager_for_window.clone(),
+        client_id,
+        channel_sender,
+        owner,
+        unsafe { (*owner).composition_sink_ptr() },
+    );
     let cw = match CandidateWindow::create(window_ctx) {
         Ok(cw) => cw,
         Err(_) => {
@@ -670,6 +679,11 @@ unsafe extern "system" fn test_key(
         return E_POINTER;
     }
     let owner = unsafe { owner_from_key(this) };
+    if let Ok(language_bar) = unsafe { (*owner).language_bar.try_borrow() } {
+        if let Some(language_bar) = language_bar.as_ref() {
+            language_bar.refresh_theme_if_needed();
+        }
+    }
     let key_code = wparam.0 as u32;
     let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;

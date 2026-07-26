@@ -83,6 +83,7 @@ pub struct WindowContext {
     pub client_id: u32,
     pub channel: SyncSender<FrontendMessage>,
     pub composition: Mutex<Option<ITfComposition>>,
+    pub composition_sink: *mut c_void,
     pub rollback_guard: Mutex<RollbackGuard>,
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
     pub tip: *mut ComTip,
@@ -121,7 +122,7 @@ fn create_gdi_font(font_size: i32, font_face: &str, antialias: AntialiasMode) ->
     let face: Vec<u16> = font_face.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         CreateFontW(
-            font_size,
+            -font_pixel_height(font_size),
             0,
             0,
             0,
@@ -142,6 +143,10 @@ fn create_gdi_font(font_size: i32, font_face: &str, antialias: AntialiasMode) ->
             windows::core::PCWSTR::from_raw(face.as_ptr()),
         )
     }
+}
+
+fn font_pixel_height(points: i32) -> i32 {
+    points.max(1)
 }
 
 impl CandidateWindow {
@@ -221,6 +226,7 @@ impl CandidateWindow {
         client_id: u32,
         channel: SyncSender<FrontendMessage>,
         tip: *mut ComTip,
+        composition_sink: *mut c_void,
     ) -> Box<WindowContext> {
         let config = crate::ui_settings::load_config();
         let font = create_gdi_font(
@@ -244,6 +250,7 @@ impl CandidateWindow {
             client_id,
             channel,
             composition: Mutex::new(None),
+            composition_sink,
             rollback_guard: Mutex::new(RollbackGuard::default()),
             rollback_anchor: Mutex::new(None),
             tip,
@@ -622,12 +629,10 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             boxed.candidates.len()
         ));
 
-        let char_width = cfg.style.font_point.max(1);
-        let content_height = cfg
-            .style
-            .font_point
-            .max(cfg.style.label_font_point)
-            .max(cfg.style.comment_font_point);
+        let char_width = font_pixel_height(cfg.style.font_point);
+        let content_height = font_pixel_height(cfg.style.font_point)
+            .max(font_pixel_height(cfg.style.label_font_point))
+            .max(font_pixel_height(cfg.style.comment_font_point));
         let line_height = (content_height + cfg.style.layout.hilite_padding_y.max(0) * 2).max(1);
         let (mut rows, content_width, content_height) =
             build_rows(&boxed, line_height, char_width, &cfg.style);
@@ -728,6 +733,7 @@ fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
                         posted.token,
                         &ctx.channel as *const SyncSender<FrontendMessage>,
                         &ctx.composition as *const Mutex<Option<ITfComposition>>,
+                        ctx.composition_sink,
                         &ctx.rollback_guard as *const Mutex<RollbackGuard>,
                         &ctx.rollback_anchor
                             as *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
