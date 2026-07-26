@@ -163,3 +163,62 @@ Starting named pipe server...
 [engine] connection 70 error: pipe error: pipe error: pipe disconnected
 [engine] connection 81 handshake complete
 [engine] connection 81 error: pipe error: pipe error: pipe disconnected
+[engine] connection 82 handshake complete
+[engine] connection 83 handshake complete
+[engine] connection 84 handshake complete
+[engine] connection 85 handshake complete
+[engine] connection 85 error: pipe error: pipe error: pipe disconnected
+[engine] connection 82 error: pipe error: pipe error: pipe disconnected
+[engine] connection 84 error: pipe error: pipe error: pipe disconnected
+[engine] connection 83 error: pipe error: pipe error: pipe disconnected
+[engine] connection 86 handshake complete
+[engine] connection 87 handshake complete
+[engine] connection 87 error: pipe error: pipe error: pipe disconnected
+[engine] connection 88 handshake complete
+[engine] connection 89 handshake complete
+[engine] connection 89 error: pipe error: pipe error: pipe disconnected
+[engine] connection 88 error: pipe error: pipe error: pipe disconnected
+[engine] connection 90 handshake complete
+[engine] connection 91 handshake complete
+[engine] connection 92 handshake complete
+[engine] connection 93 handshake complete
+[engine] connection 93 error: pipe error: pipe error: pipe disconnected
+[engine] connection 90 error: pipe error: pipe error: pipe disconnected
+[engine] connection 94 handshake complete
+[engine] connection 94 error: pipe error: pipe error: pipe disconnected
+[engine] connection 91 error: pipe error: pipe error: pipe disconnected
+[engine] connection 92 error: pipe error: pipe error: pipe disconnected
+[engine] connection 86 error: pipe error: pipe error: pipe disconnected
+[engine] connection 95 handshake complete
+[engine] connection 96 handshake complete
+[engine] connection 96 error: pipe error: pipe error: pipe disconnected
+[engine] connection 95 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 97 handshake complete
+[engine] connection 97 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 98 handshake complete
+[engine] connection 99 handshake complete
+[engine] connection 98 error: pipe error: pipe error: pipe disconnected
+[engine] connection 99 error: pipe error: pipe error: pipe disconnected
+[engine] connection 100 handshake complete
+[engine] connection 100 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 101 handshake complete
+[engine] connection 101 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 102 handshake complete
+[engine] connection 102 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 103 handshake complete
+[engine] connection 104 handshake complete
+[engine] connection 103 error: pipe error: pipe error: I/O error: 管道正在被关闭。 (0x800700E8)
+[engine] connection 105 handshake complete
+[engine] connection 105 error: pipe error: pipe error: pipe disconnected
+[engine] connection 106 handshake complete
+[engine] connection 107 handshake complete
+[engine] connection 107 error: pipe error: pipe error: pipe disconnected
+[engine] connection 108 handshake complete
+[engine] connection 108 error: pipe error: pipe error: pipe disconnected
+[engine] connection 106 error: pipe error: pipe error: pipe disconnected
+[engine] connection 109 handshake complete
+[engine] connection 110 handshake complete
+[engine] connection 111 handshake complete
+[engine] connection 111 error: pipe error: pipe error: pipe disconnected
+[engine] connection 110 error: pipe error: pipe error: pipe disconnected
+[engine] connection 104 error: pipe error: pipe error: pipe disconnected
