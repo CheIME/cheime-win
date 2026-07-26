@@ -155,8 +155,14 @@ fn io_thread_main(
                 return;
             }
 
-            // Send pending frontend messages
-            while let Ok(msg) = receiver.try_recv() {
+            // Send at most one frontend message before servicing the read side.
+            //
+            // A key normally produces both a PlatformAction and a CandidateSnapshot.
+            // Draining the entire input queue here lets a fast typist fill the
+            // client-to-engine pipe while the engine simultaneously fills the
+            // engine-to-client pipe with those larger responses. Both peers then
+            // block in write/flush and the input method appears frozen.
+            if let Ok(msg) = receiver.try_recv() {
                 let msg = session.prepare(msg);
                 if writer.write_message(&codec, &msg).is_err() {
                     break 'connected ReconnectReason::WriteError;
@@ -168,41 +174,31 @@ fn io_thread_main(
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(25);
             match reader.read_message_until(&codec, deadline) {
                 Ok(Some(msg)) => {
-                    match session.observe_engine(&msg) {
-                        Ok(()) => {}
-                        Err(e) if e == "stale epoch" => {
-                            // Silently discard stale messages from previous sessions
-                            continue;
-                        }
-                        Err(e) => {
-                            tsf_log(&format!("[CheIME] IO: identity error: {e}, reconnecting"));
-                            break 'connected ReconnectReason::IdentityError;
-                        }
+                    if let Err(reason) = dispatch_engine_message(&mut session, hwnd, msg) {
+                        break 'connected reason;
                     }
-                    match msg {
-                        EngineMessage::CandidateSnapshot { snapshot, .. } => {
-                            tsf_log(&format!(
-                                "[CheIME] IO snapshot preedit={} candidates={}",
-                                snapshot.preedit,
-                                snapshot.candidates.len()
-                            ));
-                            post_snapshot(hwnd, &snapshot);
+
+                    // Drain the response burst that belongs to the message just
+                    // written before accepting another outbound key. The first
+                    // response has already arrived, so a short deadline is enough
+                    // and avoids adding perceptible latency when there is only one.
+                    for _ in 0..31 {
+                        let drain_deadline =
+                            std::time::Instant::now() + std::time::Duration::from_millis(1);
+                        match reader.read_message_until(&codec, drain_deadline) {
+                            Ok(Some(msg)) => {
+                                if let Err(reason) =
+                                    dispatch_engine_message(&mut session, hwnd, msg)
+                                {
+                                    break 'connected reason;
+                                }
+                            }
+                            Err(PipeError::TimedOut) => break,
+                            Ok(None) | Err(PipeError::Disconnected) => {
+                                break 'connected ReconnectReason::EngineDisconnected;
+                            }
+                            Err(_) => break 'connected ReconnectReason::ReadError,
                         }
-                        EngineMessage::PlatformAction { header, action } => {
-                            tsf_log(&format!("[CheIME] IO action={action:?}"));
-                            post_action(
-                                hwnd,
-                                PostedAction {
-                                    token: cheime_model::CommitToken {
-                                        session: header.session,
-                                        epoch: header.epoch,
-                                        action_id: action.id,
-                                    },
-                                    action,
-                                },
-                            );
-                        }
-                        _ => {}
                     }
                 }
                 Err(PipeError::TimedOut) => {}
@@ -216,6 +212,47 @@ fn io_thread_main(
         post_status(hwnd, connected, detail);
         std::thread::sleep(reconnect_reason.retry_delay());
     }
+}
+
+fn dispatch_engine_message(
+    session: &mut FrontendSession,
+    hwnd: HWND,
+    msg: EngineMessage,
+) -> Result<(), ReconnectReason> {
+    match session.observe_engine(&msg) {
+        Ok(()) => {}
+        Err(e) if e == "stale epoch" => return Ok(()),
+        Err(e) => {
+            tsf_log(&format!("[CheIME] IO: identity error: {e}, reconnecting"));
+            return Err(ReconnectReason::IdentityError);
+        }
+    }
+    match msg {
+        EngineMessage::CandidateSnapshot { snapshot, .. } => {
+            tsf_log(&format!(
+                "[CheIME] IO snapshot preedit={} candidates={}",
+                snapshot.preedit,
+                snapshot.candidates.len()
+            ));
+            post_snapshot(hwnd, &snapshot);
+        }
+        EngineMessage::PlatformAction { header, action } => {
+            tsf_log(&format!("[CheIME] IO action={action:?}"));
+            post_action(
+                hwnd,
+                PostedAction {
+                    token: cheime_model::CommitToken {
+                        session: header.session,
+                        epoch: header.epoch,
+                        action_id: action.id,
+                    },
+                    action,
+                },
+            );
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn try_connect(
