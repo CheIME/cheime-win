@@ -1058,6 +1058,13 @@ unsafe fn paint(
     let original = unsafe { SelectObject(hdc, font) };
 
     for row in rows {
+        let row_height = (row.bounds.bottom - row.bounds.top).max(1);
+        let candidate_y =
+            row.bounds.top + (row_height - font_pixel_height(config.style.font_point)).max(0) / 2;
+        let label_y = row.bounds.top
+            + (row_height - font_pixel_height(config.style.label_font_point)).max(0) / 2;
+        let comment_y = row.bounds.top
+            + (row_height - font_pixel_height(config.style.comment_font_point)).max(0) / 2;
         unsafe {
             if row.highlighted {
                 draw_selection_box(
@@ -1073,7 +1080,7 @@ unsafe fn paint(
             if row.candidate_index.is_none() {
                 SetTextColor(hdc, parse_hex(&scheme.text_color).unwrap_or(fg));
                 let _ = SelectObject(hdc, font);
-                let _ = TextOutW(hdc, row.x, row.y, &row.text);
+                let _ = TextOutW(hdc, row.x, candidate_y, &row.text);
                 continue;
             }
             let mut x = row.x;
@@ -1087,13 +1094,13 @@ unsafe fn paint(
                     },
                 );
                 let _ = SelectObject(hdc, label_font);
-                let _ = TextOutW(hdc, x, row.y, &row.label);
+                let _ = TextOutW(hdc, x, label_y, &row.label);
                 x += text_utf16_width(&row.label, config.style.label_font_point)
                     + config.style.layout.hilite_spacing.max(0);
             }
             SetTextColor(hdc, if row.highlighted { selected_fg } else { fg });
             let _ = SelectObject(hdc, font);
-            let _ = TextOutW(hdc, x, row.y, &row.candidate);
+            let _ = TextOutW(hdc, x, candidate_y, &row.candidate);
             x += text_utf16_width(&row.candidate, config.style.font_point);
             if !row.comment.is_empty() {
                 x += config.style.layout.hilite_spacing.max(0);
@@ -1106,7 +1113,7 @@ unsafe fn paint(
                     },
                 );
                 let _ = SelectObject(hdc, comment_font);
-                let _ = TextOutW(hdc, x, row.y, &row.comment);
+                let _ = TextOutW(hdc, x, comment_y, &row.comment);
             }
         }
     }
