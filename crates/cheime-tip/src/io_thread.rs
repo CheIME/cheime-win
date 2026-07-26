@@ -168,7 +168,12 @@ fn io_thread_main(
                     break 'connected ReconnectReason::WriteError;
                 }
             }
-            let _ = writer.flush();
+            // Do not call FlushFileBuffers for normal named-pipe traffic.
+            // On Windows it waits until the server has consumed every byte.
+            // The engine flushes each response in the same way, so under a
+            // burst of keys the client can wait for the engine to read while
+            // the engine waits for the client to read: a cross-pipe deadlock.
+            // WriteFile already transfers the complete framed message.
 
             // Read one complete response, bounded so outbound work and shutdown stay responsive.
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(25);

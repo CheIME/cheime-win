@@ -37,7 +37,14 @@ use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 /// Write a diagnostic line to %TEMP%\cheime-tsf.log.
 pub fn tsf_log(msg: &str) {
     use std::io::Write;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| {
+        cfg!(debug_assertions)
+            || std::env::var_os("CHEIME_TSF_LOG").is_some_and(|value| value != "0")
+    }) {
+        return;
+    }
     static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
     if let Ok(mut guard) = LOG.lock() {
         if guard.is_none() {

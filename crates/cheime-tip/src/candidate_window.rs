@@ -95,6 +95,7 @@ pub struct WindowContext {
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
     pub tip: *mut ComTip,
     pub render: Mutex<RenderState>,
+    shadow_pixels: Mutex<Option<ShadowPixels>>,
 }
 
 impl Drop for WindowContext {
@@ -123,6 +124,22 @@ pub struct RenderState {
     pub font: HFONT,
     pub label_font: HFONT,
     pub comment_font: HFONT,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ShadowKey {
+    width: i32,
+    height: i32,
+    body_width: i32,
+    body_height: i32,
+    blur: i32,
+    corner: i32,
+    color: u32,
+}
+
+struct ShadowPixels {
+    key: ShadowKey,
+    pixels: Vec<u32>,
 }
 
 pub struct CandidateWindow {
@@ -302,6 +319,7 @@ impl CandidateWindow {
                 label_font,
                 comment_font,
             }),
+            shadow_pixels: Mutex::new(None),
         })
     }
 }
@@ -737,6 +755,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 window_height,
                 cfg,
                 dark_mode,
+                &ctx.shadow_pixels,
             );
             let _ = SetWindowPos(
                 hwnd,
@@ -772,6 +791,7 @@ unsafe fn update_shadow_window(
     body_height: i32,
     config: &UiConfig,
     dark_mode: bool,
+    cache: &Mutex<Option<ShadowPixels>>,
 ) {
     let blur = config.style.layout.shadow_radius.max(0);
     if hwnd.is_invalid() || blur == 0 {
@@ -817,32 +837,33 @@ unsafe fn update_shadow_window(
     let old = unsafe { SelectObject(dc, bitmap) };
     let scheme = config.active_scheme(dark_mode);
     let color = parse_hex(&scheme.shadow_color).unwrap_or(COLORREF(0));
-    let red = (color.0 & 0xff) as u8;
-    let green = ((color.0 >> 8) & 0xff) as u8;
-    let blue = ((color.0 >> 16) & 0xff) as u8;
-    let corner = config.style.layout.corner_radius.max(0) as f32;
-    let sigma = (blur as f32 / 2.0).max(0.75);
-    let peak_alpha = 72.0f32;
     let pixels =
         unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), (width * height) as usize) };
-    let half_w = body_width as f32 / 2.0;
-    let half_h = body_height as f32 / 2.0;
-    let center_x = extent as f32 + half_w;
-    let center_y = extent as f32 + half_h;
-    for py in 0..height {
-        for px in 0..width {
-            let qx = ((px as f32 + 0.5 - center_x).abs() - (half_w - corner)).max(0.0);
-            let qy = ((py as f32 + 0.5 - center_y).abs() - (half_h - corner)).max(0.0);
-            let distance = (qx * qx + qy * qy).sqrt() - corner;
-            let outside = distance.max(0.0);
-            let alpha = (peak_alpha * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
-                .round()
-                .clamp(0.0, 255.0) as u32;
-            let premultiply = |channel: u8| (channel as u32 * alpha + 127) / 255;
-            pixels[(py * width + px) as usize] = (alpha << 24)
-                | (premultiply(red) << 16)
-                | (premultiply(green) << 8)
-                | premultiply(blue);
+    let key = ShadowKey {
+        width,
+        height,
+        body_width,
+        body_height,
+        blur,
+        corner: config.style.layout.corner_radius.max(0),
+        color: color.0,
+    };
+    let cache_hit = cache.lock().is_ok_and(|guard| {
+        guard
+            .as_ref()
+            .filter(|entry| entry.key == key)
+            .is_some_and(|entry| {
+                pixels.copy_from_slice(&entry.pixels);
+                true
+            })
+    });
+    if !cache_hit {
+        render_shadow_pixels(pixels, key, extent);
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some(ShadowPixels {
+                key,
+                pixels: pixels.to_vec(),
+            });
         }
     }
 
@@ -888,6 +909,34 @@ unsafe fn update_shadow_window(
             SWP_NOACTIVATE,
         );
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+fn render_shadow_pixels(pixels: &mut [u32], key: ShadowKey, extent: i32) {
+    let red = (key.color & 0xff) as u8;
+    let green = ((key.color >> 8) & 0xff) as u8;
+    let blue = ((key.color >> 16) & 0xff) as u8;
+    let corner = key.corner as f32;
+    let sigma = (key.blur as f32 / 2.0).max(0.75);
+    let half_w = key.body_width as f32 / 2.0;
+    let half_h = key.body_height as f32 / 2.0;
+    let center_x = extent as f32 + half_w;
+    let center_y = extent as f32 + half_h;
+    for py in 0..key.height {
+        for px in 0..key.width {
+            let qx = ((px as f32 + 0.5 - center_x).abs() - (half_w - corner)).max(0.0);
+            let qy = ((py as f32 + 0.5 - center_y).abs() - (half_h - corner)).max(0.0);
+            let distance = (qx * qx + qy * qy).sqrt() - corner;
+            let outside = distance.max(0.0);
+            let alpha = (72.0 * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
+                .round()
+                .clamp(0.0, 255.0) as u32;
+            let premultiply = |channel: u8| (channel as u32 * alpha + 127) / 255;
+            pixels[(py * key.width + px) as usize] = (alpha << 24)
+                | (premultiply(red) << 16)
+                | (premultiply(green) << 8)
+                | premultiply(blue);
+        }
     }
 }
 
