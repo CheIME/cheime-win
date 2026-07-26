@@ -205,10 +205,11 @@ fn handle_commit(ec: u32, data: &EditSessionData, text: &str, action: &PlatformA
     tsf_log(&format!(
         "[CheIME] handle_commit START text={text:?} ec={ec}"
     ));
-    // Always use commit_at_selection — insert text at cursor, then end composition.
-    // The ITfComposition from StartComposition may not survive across edit sessions
-    // when no sink is provided, so we avoid relying on it for commit.
-    let result = commit_at_selection(ec, &data.context, text);
+    // Replace the active composition range when inline preedit is present.  Inserting
+    // at the current selection would leave the visible pinyin behind in hosts whose
+    // selection sits at the end of the composition.
+    let result = commit_active_composition(ec, &data.context, data.composition, text)
+        .or_else(|_| commit_at_selection(ec, &data.context, text));
     if let Ok(anchor) = result.as_ref() {
         // Clean up composition state regardless
         let _ = end_active_composition(ec, data.composition);
@@ -314,7 +315,9 @@ fn handle_set_preedit(
                 "[CheIME] SetPreedit: display attribute failed: {error}"
             ));
         }
-        let _ = unsafe { range.Collapse(ec, TF_ANCHOR_END) };
+        if let Err(error) = set_selection_at_range_end(ec, context, &range) {
+            break 'work Err(error);
+        }
 
         Ok(())
     };
@@ -399,6 +402,48 @@ fn apply_preedit_display_attribute(
     let value = windows::core::VARIANT::from(atom as i32);
     unsafe { property.SetValue(ec, range, &value) }
         .map_err(|error| format!("set attribute property: {error}"))
+}
+
+fn set_selection_at_range_end(
+    ec: u32,
+    context: &ITfContext,
+    range: &windows::Win32::UI::TextServices::ITfRange,
+) -> Result<(), String> {
+    let caret = unsafe { range.Clone() }.map_err(|error| format!("Clone caret: {error}"))?;
+    unsafe { caret.Collapse(ec, TF_ANCHOR_END) }
+        .map_err(|error| format!("Collapse caret: {error}"))?;
+    let mut selection = [zeroed_selection()];
+    selection[0].range = std::mem::ManuallyDrop::new(Some(caret));
+    let result = unsafe { context.SetSelection(ec, &selection) }
+        .map_err(|error| format!("SetSelection: {error}"));
+    release_selection_range(selection);
+    result
+}
+
+fn commit_active_composition(
+    ec: u32,
+    context: &ITfContext,
+    composition_ptr: *const Mutex<Option<ITfComposition>>,
+    text: &str,
+) -> Result<windows::Win32::UI::TextServices::ITfRange, String> {
+    let comp_mutex = unsafe { &*composition_ptr };
+    let mut guard = comp_mutex
+        .lock()
+        .map_err(|_| "composition mutex poisoned".to_owned())?;
+    let composition = guard
+        .as_ref()
+        .ok_or_else(|| "no active composition".to_owned())?;
+    let range = unsafe { composition.GetRange() }.map_err(|error| format!("GetRange: {error}"))?;
+    let text_wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe { range.SetText(ec, 0, &text_wide) }.map_err(|error| format!("SetText: {error}"))?;
+    set_selection_at_range_end(ec, context, &range)?;
+    let anchor = unsafe { range.Clone() }.map_err(|error| format!("Clone anchor: {error}"))?;
+    unsafe { anchor.Collapse(ec, TF_ANCHOR_END) }
+        .map_err(|error| format!("Collapse anchor: {error}"))?;
+    unsafe { composition.EndComposition(ec) }
+        .map_err(|error| format!("EndComposition: {error}"))?;
+    *guard = None;
+    Ok(anchor)
 }
 
 /// Handle `CancelComposition`: clear preedit text, then end the composition.

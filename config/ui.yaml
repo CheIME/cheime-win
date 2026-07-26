@@ -4,9 +4,9 @@
 style:
   color_scheme: windows_11_light
   color_scheme_dark: windows_11_dark
-  font_face: "Segoe UI, Microsoft YaHei UI"
-  label_font_face: "Segoe UI, Microsoft YaHei UI"
-  comment_font_face: "Segoe UI, Microsoft YaHei UI"
+  font_face: "Microsoft YaHei UI"
+  label_font_face: "Microsoft YaHei UI"
+  comment_font_face: "Microsoft YaHei UI"
   font_point: 16
   label_font_point: 12
   comment_font_point: 12
