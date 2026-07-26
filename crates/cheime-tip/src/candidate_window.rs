@@ -23,13 +23,13 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
-    BLENDFUNCTION, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen,
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateRectRgn, CreateRoundRectRgn,
-    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT,
-    InvalidateRect, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TEXTMETRICW,
-    TRANSPARENT, TextOutW,
+    BLENDFUNCTION, BeginPaint, BitBlt, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+    CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor,
+    GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect, NONANTIALIASED_QUALITY,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
@@ -45,11 +45,11 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetWindowLongPtrW, HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
-    WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE,
-    WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowLongPtrW, HMENU, HWND_TOPMOST, IsWindowVisible, RegisterClassW, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
+    UpdateLayeredWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -375,7 +375,10 @@ unsafe extern "system" fn candidate_window_proc(
     match msg {
         WM_CREATE => LRESULT(0),
 
-        WM_ERASEBKGND => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        // The whole client area is painted through an off-screen buffer below.
+        // Letting DefWindowProc erase first exposes a blank frame between every
+        // candidate snapshot and makes the persistent window appear recreated.
+        WM_ERASEBKGND => LRESULT(1),
 
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -388,31 +391,54 @@ unsafe extern "system" fn candidate_window_proc(
                         };
                         return LRESULT(0);
                     };
-                    let scheme = render.config.active_scheme(render.dark_mode);
-                    let background = parse_hex(&scheme.back_color)
-                        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOW) }));
                     let mut client = RECT::default();
                     if unsafe { GetClientRect(hwnd, &mut client) }.is_ok() {
-                        draw_window_surface(
-                            hdc,
-                            client,
-                            &render.config,
-                            render.dark_mode,
-                            background,
-                        );
-                    }
-                    if let Ok(st) = ctx.snapshot.lock() {
-                        if let Some((_, rows)) = st.as_ref() {
-                            // Fix 3: use cached font instead of creating one per paint.
+                        let width = (client.right - client.left).max(1);
+                        let height = (client.bottom - client.top).max(1);
+                        let buffer_dc = unsafe { CreateCompatibleDC(hdc) };
+                        let buffer_bitmap = unsafe { CreateCompatibleBitmap(hdc, width, height) };
+                        if !buffer_dc.is_invalid() && !buffer_bitmap.is_invalid() {
+                            let old_bitmap = unsafe { SelectObject(buffer_dc, buffer_bitmap) };
+                            let scheme = render.config.active_scheme(render.dark_mode);
+                            let background = parse_hex(&scheme.back_color)
+                                .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOW) }));
+                            draw_window_surface(
+                                buffer_dc,
+                                client,
+                                &render.config,
+                                render.dark_mode,
+                                background,
+                            );
+                            if let Ok(st) = ctx.snapshot.lock() {
+                                if let Some((_, rows)) = st.as_ref() {
+                                    unsafe {
+                                        paint(
+                                            buffer_dc,
+                                            rows,
+                                            &render.config,
+                                            render.font,
+                                            render.label_font,
+                                            render.comment_font,
+                                        );
+                                    }
+                                }
+                            }
                             unsafe {
-                                paint(
-                                    hdc,
-                                    rows,
-                                    &render.config,
-                                    render.font,
-                                    render.label_font,
-                                    render.comment_font,
-                                );
+                                let _ = BitBlt(hdc, 0, 0, width, height, buffer_dc, 0, 0, SRCCOPY);
+                                let _ = SelectObject(buffer_dc, old_bitmap);
+                                let _ = DeleteObject(buffer_bitmap);
+                                let _ = DeleteDC(buffer_dc);
+                            }
+                        } else {
+                            if !buffer_bitmap.is_invalid() {
+                                unsafe {
+                                    let _ = DeleteObject(buffer_bitmap);
+                                }
+                            }
+                            if !buffer_dc.is_invalid() {
+                                unsafe {
+                                    let _ = DeleteDC(buffer_dc);
+                                }
                             }
                         }
                     }
@@ -772,8 +798,10 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 window_height,
                 cfg.style.layout.corner_radius,
             );
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_ERASE);
+            if !IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            let _ = InvalidateRect(hwnd, None, false);
         }
     } else {
         unsafe {
@@ -908,7 +936,9 @@ unsafe fn update_shadow_window(
             height,
             SWP_NOACTIVATE,
         );
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
     }
 }
 
