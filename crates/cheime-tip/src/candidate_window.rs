@@ -38,9 +38,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
     GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-    GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetSmoothingMode, GdiplusStartup,
-    GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
-    SmoothingModeAntiAlias8x8, UnitPixel,
+    GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetPenMode, GdipSetSmoothingMode,
+    GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
+    PenAlignmentInset, SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
@@ -546,23 +546,14 @@ fn draw_window_surface(
         if width > 0 {
             let color = parse_hex(&config.active_scheme(dark_mode).border_color)
                 .unwrap_or(COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-            let inset = (width + 1) / 2;
-            let border_bounds = RECT {
-                left: bounds.left + inset,
-                top: bounds.top + inset,
-                right: bounds.right - inset,
-                bottom: bounds.bottom - inset,
-            };
-            let border_path = rounded_path(border_bounds, (radius - inset).max(0));
             let mut pen: *mut GpPen = std::ptr::null_mut();
-            if !border_path.is_null()
-                && GdipCreatePen1(colorref_to_argb(color), width as f32, UnitPixel, &mut pen).0 == 0
-            {
-                let _ = GdipDrawPath(graphics, pen, border_path);
+            if GdipCreatePen1(colorref_to_argb(color), width as f32, UnitPixel, &mut pen).0 == 0 {
+                // Use the exact same outer path as the white fill. Inset pen
+                // alignment keeps the full configured width inside the window
+                // without creating a second, differently shaped corner.
+                let _ = GdipSetPenMode(pen, PenAlignmentInset);
+                let _ = GdipDrawPath(graphics, pen, path);
                 let _ = GdipDeletePen(pen);
-            }
-            if !border_path.is_null() {
-                let _ = GdipDeletePath(border_path);
             }
         }
         let _ = GdipDeletePath(path);
