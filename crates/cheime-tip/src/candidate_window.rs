@@ -60,6 +60,7 @@ use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 const CANDIDATE_WINDOW_CLASS: &str = "CheIME_CandidateWindow";
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_CHEIME_RELOAD_CONFIG: u32 = 0x8000 + 0x124;
+const WINDOW_OUTLINE: i32 = 1;
 
 // ── COM constants (local copies to avoid coupling) ────────────────────
 const S_OK: HRESULT = HRESULT(0);
@@ -518,12 +519,14 @@ fn draw_window_surface(
     hdc: HDC,
     bounds: RECT,
     config: &UiConfig,
-    _dark_mode: bool,
+    dark_mode: bool,
     background: COLORREF,
 ) {
+    let outline = parse_hex(&config.active_scheme(dark_mode).border_color)
+        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
     // Compatible bitmaps have undefined initial pixels. Clear the entire
-    // buffer before drawing the antialiased white surface.
-    let clear_brush = unsafe { CreateSolidBrush(background) };
+    // buffer with the bottom outline layer before antialiased drawing.
+    let clear_brush = unsafe { CreateSolidBrush(outline) };
     if !clear_brush.is_invalid() {
         unsafe {
             let _ = FillRect(hdc, &bounds, clear_brush);
@@ -531,17 +534,29 @@ fn draw_window_surface(
         }
     }
     with_antialiased_graphics(hdc, |graphics| unsafe {
-        let radius = config.style.layout.corner_radius.max(0) as f32;
-        let surface = rounded_surface_path(bounds, radius, 0.0);
-        if surface.is_null() {
+        let outer_radius =
+            config.style.layout.corner_radius.max(0) as f32 + WINDOW_OUTLINE as f32;
+        let outer = rounded_surface_path(bounds, outer_radius, 0.0);
+        if outer.is_null() {
             return;
         }
+        let mut outline_brush: *mut GpSolidFill = std::ptr::null_mut();
+        if GdipCreateSolidFill(colorref_to_argb(outline), &mut outline_brush).0 == 0 {
+            let _ = GdipFillPath(graphics, outline_brush.cast::<GpBrush>(), outer);
+            let _ = GdipDeleteBrush(outline_brush.cast::<GpBrush>());
+        }
+        let surface = rounded_surface_path(bounds, outer_radius, WINDOW_OUTLINE as f32);
         let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
-        if GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0 {
+        if !surface.is_null()
+            && GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0
+        {
             let _ = GdipFillPath(graphics, surface_brush.cast::<GpBrush>(), surface);
             let _ = GdipDeleteBrush(surface_brush.cast::<GpBrush>());
         }
-        let _ = GdipDeletePath(surface);
+        if !surface.is_null() {
+            let _ = GdipDeletePath(surface);
+        }
+        let _ = GdipDeletePath(outer);
     });
 }
 
@@ -751,11 +766,13 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         // horizontal layouts can grow substantially when a longer phrase
         // appears. Screen-work-area fitting below keeps the resulting window
         // visible without truncating its rows.
-        let window_width = content_width.max(cfg.style.layout.min_width).max(1);
+        let surface_width = content_width.max(cfg.style.layout.min_width).max(1);
         if cfg.style.layout.r#type == LayoutType::Vertical {
-            stretch_vertical_candidate_rows(&mut rows, window_width, cfg.style.layout.margin_x);
+            stretch_vertical_candidate_rows(&mut rows, surface_width, cfg.style.layout.margin_x);
         }
-        let window_height = content_height.max(1);
+        offset_rows(&mut rows, WINDOW_OUTLINE, WINDOW_OUTLINE);
+        let window_width = surface_width + WINDOW_OUTLINE * 2;
+        let window_height = content_height.max(1) + WINDOW_OUTLINE * 2;
         // Sync has_composition from engine preedit
         if !ctx.tip.is_null() {
             unsafe {
@@ -792,8 +809,8 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 )
             });
         let (x, y) = fit_candidate_to_work_area(
-            anchor_x,
-            anchor_y,
+            anchor_x - WINDOW_OUTLINE,
+            anchor_y - WINDOW_OUTLINE,
             window_width,
             cfg.style.layout.screen_edge_margin,
         );
@@ -924,7 +941,7 @@ unsafe fn update_shadow_window(
         body_width,
         body_height,
         blur,
-        corner: config.style.layout.corner_radius.max(0),
+        corner: config.style.layout.corner_radius.max(0) + WINDOW_OUTLINE,
         color: color.0,
         opacity,
     };
@@ -1030,6 +1047,17 @@ fn stretch_vertical_candidate_rows(rows: &mut [RowRender], window_width: i32, ma
     let right = (window_width - margin_x.max(0)).max(1);
     for row in rows.iter_mut().filter(|row| row.candidate_index.is_some()) {
         row.bounds.right = right.max(row.bounds.left + 1);
+    }
+}
+
+fn offset_rows(rows: &mut [RowRender], dx: i32, dy: i32) {
+    for row in rows {
+        row.x += dx;
+        row.y += dy;
+        row.bounds.left += dx;
+        row.bounds.right += dx;
+        row.bounds.top += dy;
+        row.bounds.bottom += dy;
     }
 }
 
@@ -1781,7 +1809,7 @@ fn colorref_to_argb(color: COLORREF) -> u32 {
 }
 
 unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_radius: i32) {
-    let radius = clamped_corner_radius(width, height, configured_radius);
+    let radius = clamped_corner_radius(width, height, configured_radius + WINDOW_OUTLINE);
     let region = if radius == 0 {
         unsafe { CreateRectRgn(0, 0, width, height) }
     } else {
