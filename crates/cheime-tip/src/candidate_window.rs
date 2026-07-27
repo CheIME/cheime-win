@@ -36,11 +36,11 @@ use windows::Win32::Graphics::Gdi::{
     TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
-    GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-    GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetPenMode, GdipSetSmoothingMode,
+    FillModeAlternate, GdipAddPathArc, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC,
+    GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
+    GdipDeletePath, GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetSmoothingMode,
     GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
-    PenAlignmentInset, SmoothingModeAntiAlias8x8, UnitPixel,
+    SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
@@ -532,8 +532,10 @@ fn draw_window_surface(
         }
     }
     with_antialiased_graphics(hdc, |graphics| unsafe {
-        let radius = config.style.layout.corner_radius.max(0);
-        let path = rounded_path(bounds, radius);
+        let border_width = config.style.layout.border_width.max(0);
+        let stroke_inset = border_width as f32 / 2.0;
+        let radius = config.style.layout.corner_radius.max(0) as f32;
+        let path = rounded_surface_path(bounds, radius, stroke_inset);
         if path.is_null() {
             return;
         }
@@ -542,16 +544,20 @@ fn draw_window_surface(
             let _ = GdipFillPath(graphics, brush.cast::<GpBrush>(), path);
             let _ = GdipDeleteBrush(brush.cast::<GpBrush>());
         }
-        let width = config.style.layout.border_width.max(0);
-        if width > 0 {
+        if border_width > 0 {
             let color = parse_hex(&config.active_scheme(dark_mode).border_color)
                 .unwrap_or(COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
             let mut pen: *mut GpPen = std::ptr::null_mut();
-            if GdipCreatePen1(colorref_to_argb(color), width as f32, UnitPixel, &mut pen).0 == 0 {
-                // Use the exact same outer path as the white fill. Inset pen
-                // alignment keeps the full configured width inside the window
-                // without creating a second, differently shaped corner.
-                let _ = GdipSetPenMode(pen, PenAlignmentInset);
+            if GdipCreatePen1(
+                colorref_to_argb(color),
+                border_width as f32,
+                UnitPixel,
+                &mut pen,
+            )
+            .0 == 0
+            {
+                // The stroke is centered on the same floating-point path as
+                // the fill and is deliberately drawn last, above the fill.
                 let _ = GdipDrawPath(graphics, pen, path);
                 let _ = GdipDeletePen(pen);
             }
@@ -1717,6 +1723,64 @@ unsafe fn rounded_path(bounds: RECT, radius: i32) -> *mut GpPath {
                 path,
                 bounds.left,
                 bounds.bottom - diameter,
+                diameter,
+                diameter,
+                90.0,
+                90.0,
+            );
+        }
+    }
+    unsafe {
+        let _ = GdipClosePathFigure(path);
+    }
+    path
+}
+
+unsafe fn rounded_surface_path(bounds: RECT, radius: f32, inset: f32) -> *mut GpPath {
+    let mut path: *mut GpPath = std::ptr::null_mut();
+    if unsafe { GdipCreatePath(FillModeAlternate, &mut path) }.0 != 0 {
+        return std::ptr::null_mut();
+    }
+    let left = bounds.left as f32 + inset;
+    let top = bounds.top as f32 + inset;
+    let right = bounds.right as f32 - inset;
+    let bottom = bounds.bottom as f32 - inset;
+    let width = (right - left).max(1.0);
+    let height = (bottom - top).max(1.0);
+    let centerline_radius = (radius - inset).max(0.0).min(width / 2.0).min(height / 2.0);
+    let diameter = centerline_radius * 2.0;
+    if diameter <= f32::EPSILON {
+        unsafe {
+            let _ = GdipAddPathArc(path, left, top, 1.0, 1.0, 0.0, 90.0);
+            let _ = GdipAddPathArc(path, right - 1.0, top, 1.0, 1.0, 90.0, 90.0);
+            let _ = GdipAddPathArc(path, right - 1.0, bottom - 1.0, 1.0, 1.0, 180.0, 90.0);
+            let _ = GdipAddPathArc(path, left, bottom - 1.0, 1.0, 1.0, 270.0, 90.0);
+        }
+    } else {
+        unsafe {
+            let _ = GdipAddPathArc(path, left, top, diameter, diameter, 180.0, 90.0);
+            let _ = GdipAddPathArc(
+                path,
+                right - diameter,
+                top,
+                diameter,
+                diameter,
+                270.0,
+                90.0,
+            );
+            let _ = GdipAddPathArc(
+                path,
+                right - diameter,
+                bottom - diameter,
+                diameter,
+                diameter,
+                0.0,
+                90.0,
+            );
+            let _ = GdipAddPathArc(
+                path,
+                left,
+                bottom - diameter,
                 diameter,
                 diameter,
                 90.0,
