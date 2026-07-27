@@ -291,20 +291,34 @@ fn synchronized_preedit(raw_input: &str, snapshot: &CandidateSnapshot) -> String
         .and_then(|candidate| candidate.annotation.as_ref())
         .map(String::as_str);
     annotation
-        .filter(|annotation| annotation_only_adds_separators(raw_input, annotation))
-        .map(ToOwned::to_owned)
+        .map(|annotation| project_separators(raw_input, annotation))
         .unwrap_or_else(|| raw_input.to_owned())
 }
 
-fn annotation_only_adds_separators(raw_input: &str, annotation: &str) -> bool {
-    !annotation.is_empty()
-        && annotation
-            .chars()
-            .all(|character| character == '\'' || character.is_ascii_lowercase())
-        && annotation
-            .chars()
-            .filter(|character| *character != '\'')
-            .eq(raw_input.chars())
+fn project_separators(raw_input: &str, annotation: &str) -> String {
+    let raw = raw_input.chars().collect::<Vec<_>>();
+    let mut matched = 0usize;
+    let mut separators = Vec::new();
+    for character in annotation.chars() {
+        if character == '\'' {
+            if matched > 0 && matched < raw.len() {
+                separators.push(matched);
+            }
+        } else if raw.get(matched).is_some_and(|raw| *raw == character) {
+            matched += 1;
+        }
+    }
+    separators.sort_unstable();
+    separators.dedup();
+
+    let mut result = String::with_capacity(raw_input.len() + separators.len());
+    for (index, character) in raw.into_iter().enumerate() {
+        if separators.binary_search(&index).is_ok() {
+            result.push('\'');
+        }
+        result.push(character);
+    }
+    result
 }
 
 fn try_connect(
@@ -685,16 +699,19 @@ mod phase2_tests {
             status: SessionStatus::Composing,
         };
         assert_eq!(synchronized_preedit("haode", &snapshot), "ha'o'de");
-        assert_eq!(synchronized_preedit("hao", &snapshot), "hao");
+        assert_eq!(synchronized_preedit("hao", &snapshot), "ha'o");
     }
 
     #[test]
-    fn annotation_may_only_insert_apostrophe_separators() {
-        assert!(annotation_only_adds_separators("haode", "ha'o'de"));
-        assert!(!annotation_only_adds_separators("hao", "ha'o'de"));
-        assert!(!annotation_only_adds_separators("haode", "hao de"));
-        assert!(!annotation_only_adds_separators("haode", "hao2de"));
-        assert!(!annotation_only_adds_separators("haode", "haodex"));
+    fn annotation_only_projects_apostrophe_separators() {
+        assert_eq!(project_separators("haode", "ha'o'de"), "ha'o'de");
+        assert_eq!(project_separators("hao", "ha'o'de"), "ha'o");
+        assert_eq!(
+            project_separators("haode", "prefix ha'o'de suffix"),
+            "ha'o'de"
+        );
+        assert_eq!(project_separators("haode", "haodex"), "haode");
+        assert_eq!(project_separators("haode", ""), "haode");
     }
 
     #[test]
