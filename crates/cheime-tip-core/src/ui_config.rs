@@ -355,7 +355,7 @@ impl Default for LayoutConfig {
             hilite_padding_y: hilite_padding_y(),
             corner_radius: corner_radius(),
             hilited_corner_radius: hilited_corner_radius(),
-            border_width: border_width(),
+            border_width: 0,
             hilited_border_width: border_width(),
             mark_width: mark_width(),
             mark_height: mark_height(),

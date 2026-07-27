@@ -39,7 +39,7 @@ style:
     hilite_padding_y: 6
     corner_radius: 8
     hilited_corner_radius: 5
-    border_width: 1
+    border_width: 0
     hilited_border_width: 1
     mark_width: 3
     mark_height: 18

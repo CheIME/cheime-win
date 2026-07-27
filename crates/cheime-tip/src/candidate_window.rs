@@ -518,20 +518,12 @@ fn draw_window_surface(
     hdc: HDC,
     bounds: RECT,
     config: &UiConfig,
-    dark_mode: bool,
+    _dark_mode: bool,
     background: COLORREF,
 ) {
-    let border_width = config.style.layout.border_width.max(0);
-    let border_color = parse_hex(&config.active_scheme(dark_mode).border_color)
-        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
     // Compatible bitmaps have undefined initial pixels. Clear the entire
-    // buffer with the outermost shape's color before antialiased drawing.
-    let clear_color = if border_width > 0 {
-        border_color
-    } else {
-        background
-    };
-    let clear_brush = unsafe { CreateSolidBrush(clear_color) };
+    // buffer before drawing the antialiased white surface.
+    let clear_brush = unsafe { CreateSolidBrush(background) };
     if !clear_brush.is_invalid() {
         unsafe {
             let _ = FillRect(hdc, &bounds, clear_brush);
@@ -540,37 +532,16 @@ fn draw_window_surface(
     }
     with_antialiased_graphics(hdc, |graphics| unsafe {
         let radius = config.style.layout.corner_radius.max(0) as f32;
-        let outer = rounded_surface_path(bounds, radius, 0.0);
-        if outer.is_null() {
+        let surface = rounded_surface_path(bounds, radius, 0.0);
+        if surface.is_null() {
             return;
         }
-        if border_width > 0 {
-            // Draw the complete outer rounded rectangle first.
-            let mut border_brush: *mut GpSolidFill = std::ptr::null_mut();
-            if GdipCreateSolidFill(colorref_to_argb(border_color), &mut border_brush).0 == 0 {
-                let _ = GdipFillPath(graphics, border_brush.cast::<GpBrush>(), outer);
-                let _ = GdipDeleteBrush(border_brush.cast::<GpBrush>());
-            }
-
-            // Draw the white surface second, inset equally on all four sides.
-            // Both rectangles therefore have exactly the same center point.
-            let inner = rounded_surface_path(bounds, radius, border_width as f32);
-            if !inner.is_null() {
-                let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
-                if GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0 {
-                    let _ = GdipFillPath(graphics, surface_brush.cast::<GpBrush>(), inner);
-                    let _ = GdipDeleteBrush(surface_brush.cast::<GpBrush>());
-                }
-                let _ = GdipDeletePath(inner);
-            }
-        } else {
-            let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
-            if GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0 {
-                let _ = GdipFillPath(graphics, surface_brush.cast::<GpBrush>(), outer);
-                let _ = GdipDeleteBrush(surface_brush.cast::<GpBrush>());
-            }
+        let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
+        if GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0 {
+            let _ = GdipFillPath(graphics, surface_brush.cast::<GpBrush>(), surface);
+            let _ = GdipDeleteBrush(surface_brush.cast::<GpBrush>());
         }
-        let _ = GdipDeletePath(outer);
+        let _ = GdipDeletePath(surface);
     });
 }
 
