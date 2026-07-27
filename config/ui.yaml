@@ -12,6 +12,7 @@ style:
   comment_font_point: 12
   page_size: 5
   show_labels: true
+  show_candidate_annotations: true
   label_format: "%s"
   inline_preedit: true
   preedit_type: composition

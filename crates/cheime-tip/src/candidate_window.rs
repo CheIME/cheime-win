@@ -728,11 +728,11 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         let line_height = (content_height + cfg.style.layout.hilite_padding_y.max(0) * 2).max(1);
         let (mut rows, content_width, content_height) =
             build_rows(&boxed, line_height, char_width, &cfg.style);
-        let max_width = cfg.style.layout.max_width;
-        let mut window_width = content_width.max(cfg.style.layout.min_width).max(1);
-        if max_width > 0 {
-            window_width = window_width.min(max_width);
-        }
+        // Candidate content is never clipped to max_width. In particular,
+        // horizontal layouts can grow substantially when a longer phrase
+        // appears. Screen-work-area fitting below keeps the resulting window
+        // visible without truncating its rows.
+        let window_width = content_width.max(cfg.style.layout.min_width).max(1);
         if cfg.style.layout.r#type == LayoutType::Vertical {
             stretch_vertical_candidate_rows(&mut rows, window_width, cfg.style.layout.margin_x);
         }
@@ -1395,7 +1395,11 @@ fn build_rows(
             } else {
                 candidate.text.clone()
             };
-            let comment_text = candidate.annotation.clone().unwrap_or_default();
+            let comment_text = if config.show_candidate_annotations {
+                candidate.annotation.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
             let text = [
                 label_text.as_str(),
                 candidate_text.as_str(),
@@ -1970,6 +1974,41 @@ mod tests {
         cfg.inline_preedit = true;
         let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
         assert!(rows.iter().all(|row| row.candidate_index.is_some()));
+    }
+
+    #[test]
+    fn candidate_annotations_can_be_hidden_without_hiding_candidates() {
+        use cheime_model::{
+            Candidate, CandidateId, DeploymentGeneration, Revision, SessionEpoch, SessionStatus,
+        };
+        let snap = CandidateSnapshot {
+            epoch: SessionEpoch::new(1),
+            revision: Revision::new(1),
+            deployment: DeploymentGeneration::new(1),
+            page: 0,
+            page_size: 5,
+            preedit: "haode".into(),
+            cursor: 5,
+            candidates: vec![Candidate {
+                id: CandidateId::new(1),
+                text: "好的".into(),
+                annotation: Some("ha'o'de".into()),
+                source: "test".into(),
+                is_emoji: false,
+            }],
+            highlighted: Some(CandidateId::new(1)),
+            status: SessionStatus::Composing,
+        };
+        let mut cfg = StyleConfig::default();
+        cfg.inline_preedit = true;
+        cfg.show_candidate_annotations = false;
+        let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
+        let candidate = rows
+            .iter()
+            .find(|row| row.candidate_index.is_some())
+            .expect("candidate row");
+        assert!(candidate.comment.is_empty());
+        assert!(!candidate.candidate.is_empty());
     }
 
     #[test]

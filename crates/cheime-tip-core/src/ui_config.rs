@@ -38,6 +38,8 @@ pub struct StyleConfig {
     pub page_size: usize,
     #[serde(default = "bool_true")]
     pub show_labels: bool,
+    #[serde(default = "bool_true")]
+    pub show_candidate_annotations: bool,
     #[serde(default = "label_format")]
     pub label_format: String,
     #[serde(default)]
@@ -316,6 +318,7 @@ impl Default for StyleConfig {
             comment_font_point: comment_font_point(),
             page_size: page_size(),
             show_labels: true,
+            show_candidate_annotations: true,
             label_format: label_format(),
             inline_preedit: false,
             preedit_type: PreeditType::Composition,

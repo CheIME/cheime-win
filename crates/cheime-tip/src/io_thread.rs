@@ -4,7 +4,7 @@
 //! 3. Runs a read/write loop
 
 use crate::tsf_interfaces::tsf_log;
-use cheime_model::{CandidateSnapshot, PlatformAction};
+use cheime_model::{CandidateSnapshot, PlatformAction, PlatformActionKind};
 use cheime_protocol::{EngineMessage, FrontendMessage};
 use cheime_tip_core::{PipeError, PipeReader, PipeWriter};
 use cheime_wire::{ClientHello, HelloAck, HelloRejected, MessageCodec, ServerHello};
@@ -148,6 +148,7 @@ fn io_thread_main(
                 continue 'reconnect;
             }
         };
+        let mut pending_preedit: Option<PostedAction> = None;
 
         // 3. Message loop
         let reconnect_reason = 'connected: loop {
@@ -179,7 +180,9 @@ fn io_thread_main(
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(25);
             match reader.read_message_until(&codec, deadline) {
                 Ok(Some(msg)) => {
-                    if let Err(reason) = dispatch_engine_message(&mut session, hwnd, msg) {
+                    if let Err(reason) =
+                        dispatch_engine_message(&mut session, hwnd, msg, &mut pending_preedit)
+                    {
                         break 'connected reason;
                     }
 
@@ -192,9 +195,12 @@ fn io_thread_main(
                             std::time::Instant::now() + std::time::Duration::from_millis(1);
                         match reader.read_message_until(&codec, drain_deadline) {
                             Ok(Some(msg)) => {
-                                if let Err(reason) =
-                                    dispatch_engine_message(&mut session, hwnd, msg)
-                                {
+                                if let Err(reason) = dispatch_engine_message(
+                                    &mut session,
+                                    hwnd,
+                                    msg,
+                                    &mut pending_preedit,
+                                ) {
                                     break 'connected reason;
                                 }
                             }
@@ -223,6 +229,7 @@ fn dispatch_engine_message(
     session: &mut FrontendSession,
     hwnd: HWND,
     msg: EngineMessage,
+    pending_preedit: &mut Option<PostedAction>,
 ) -> Result<(), ReconnectReason> {
     match session.observe_engine(&msg) {
         Ok(()) => {}
@@ -234,6 +241,14 @@ fn dispatch_engine_message(
     }
     match msg {
         EngineMessage::CandidateSnapshot { snapshot, .. } => {
+            if let Some(mut posted) = pending_preedit.take() {
+                if let PlatformActionKind::SetPreedit { text, cursor } = &mut posted.action.kind {
+                    let synchronized = synchronized_preedit(&snapshot);
+                    *cursor = synchronized.chars().count();
+                    *text = synchronized;
+                }
+                post_action(hwnd, posted);
+            }
             tsf_log(&format!(
                 "[CheIME] IO snapshot preedit={} candidates={}",
                 snapshot.preedit,
@@ -243,21 +258,40 @@ fn dispatch_engine_message(
         }
         EngineMessage::PlatformAction { header, action } => {
             tsf_log(&format!("[CheIME] IO action={action:?}"));
-            post_action(
-                hwnd,
-                PostedAction {
-                    token: cheime_model::CommitToken {
-                        session: header.session,
-                        epoch: header.epoch,
-                        action_id: action.id,
-                    },
-                    action,
+            let posted = PostedAction {
+                token: cheime_model::CommitToken {
+                    session: header.session,
+                    epoch: header.epoch,
+                    action_id: action.id,
                 },
-            );
+                action,
+            };
+            if matches!(&posted.action.kind, PlatformActionKind::SetPreedit { .. }) {
+                if let Some(previous) = pending_preedit.replace(posted) {
+                    post_action(hwnd, previous);
+                }
+            } else {
+                post_action(hwnd, posted);
+            }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn synchronized_preedit(snapshot: &CandidateSnapshot) -> String {
+    snapshot
+        .highlighted
+        .and_then(|id| {
+            snapshot
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == id)
+        })
+        .and_then(|candidate| candidate.annotation.as_ref())
+        .filter(|annotation| !annotation.is_empty())
+        .cloned()
+        .unwrap_or_else(|| snapshot.preedit.clone())
 }
 
 fn try_connect(
@@ -569,7 +603,10 @@ fn post_status(hwnd: HWND, connected: bool, detail: &str) {
 #[cfg(test)]
 mod phase2_tests {
     use super::*;
-    use cheime_model::{ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch, SessionId};
+    use cheime_model::{
+        Candidate, CandidateId, ClientInstanceId, DeploymentGeneration, Revision, SessionEpoch,
+        SessionId, SessionStatus,
+    };
     fn hello() -> ServerHello {
         ServerHello {
             protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
@@ -611,6 +648,30 @@ mod phase2_tests {
         assert_ne!(first, 0);
         assert_ne!(second, 0);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn inline_preedit_uses_highlighted_candidate_annotation() {
+        let highlighted = CandidateId::new(7);
+        let snapshot = CandidateSnapshot {
+            epoch: SessionEpoch::new(1),
+            revision: Revision::new(2),
+            deployment: DeploymentGeneration::new(1),
+            page: 0,
+            page_size: 5,
+            preedit: "haode".into(),
+            cursor: 5,
+            candidates: vec![Candidate {
+                id: highlighted,
+                text: "好的".into(),
+                annotation: Some("ha'o'de".into()),
+                source: "test".into(),
+                is_emoji: false,
+            }],
+            highlighted: Some(highlighted),
+            status: SessionStatus::Composing,
+        };
+        assert_eq!(synchronized_preedit(&snapshot), "ha'o'de");
     }
 
     #[test]
