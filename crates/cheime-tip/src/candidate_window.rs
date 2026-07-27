@@ -36,11 +36,11 @@ use windows::Win32::Graphics::Gdi::{
     TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    FillModeAlternate, GdipAddPathArc, GdipAddPathArcI, GdipAddPathPath, GdipClosePathFigure,
-    GdipCreateFromHDC, GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush,
-    GdipDeleteGraphics, GdipDeletePath, GdipDeletePen, GdipDrawPath, GdipFillPath,
-    GdipSetSmoothingMode, GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen,
-    GpSolidFill, SmoothingModeAntiAlias8x8, UnitPixel,
+    FillModeAlternate, GdipAddPathArc, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC,
+    GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
+    GdipDeletePath, GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetSmoothingMode,
+    GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
+    SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
@@ -521,10 +521,17 @@ fn draw_window_surface(
     dark_mode: bool,
     background: COLORREF,
 ) {
+    let border_width = config.style.layout.border_width.max(0);
+    let border_color = parse_hex(&config.active_scheme(dark_mode).border_color)
+        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
     // Compatible bitmaps have undefined initial pixels. Clear the entire
-    // buffer before drawing the antialiased rounded path so the few pixels
-    // between the GDI region and GDI+ coverage never appear as black seams.
-    let clear_brush = unsafe { CreateSolidBrush(background) };
+    // buffer with the outermost shape's color before antialiased drawing.
+    let clear_color = if border_width > 0 {
+        border_color
+    } else {
+        background
+    };
+    let clear_brush = unsafe { CreateSolidBrush(clear_color) };
     if !clear_brush.is_invalid() {
         unsafe {
             let _ = FillRect(hdc, &bounds, clear_brush);
@@ -532,43 +539,38 @@ fn draw_window_surface(
         }
     }
     with_antialiased_graphics(hdc, |graphics| unsafe {
-        let border_width = config.style.layout.border_width.max(0);
         let radius = config.style.layout.corner_radius.max(0) as f32;
-        let path = rounded_surface_path(bounds, radius, 0.0);
-        if path.is_null() {
+        let outer = rounded_surface_path(bounds, radius, 0.0);
+        if outer.is_null() {
             return;
         }
-        let mut brush: *mut GpSolidFill = std::ptr::null_mut();
-        if GdipCreateSolidFill(colorref_to_argb(background), &mut brush).0 == 0 {
-            let _ = GdipFillPath(graphics, brush.cast::<GpBrush>(), path);
-            let _ = GdipDeleteBrush(brush.cast::<GpBrush>());
-        }
         if border_width > 0 {
-            let color = parse_hex(&config.active_scheme(dark_mode).border_color)
-                .unwrap_or(COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-            let inner = rounded_surface_path(bounds, radius, border_width as f32);
-            let mut ring: *mut GpPath = std::ptr::null_mut();
-            if !inner.is_null()
-                && GdipCreatePath(FillModeAlternate, &mut ring).0 == 0
-                && !ring.is_null()
-            {
-                // Build a real border ring instead of relying on a centered
-                // pen that GDI+ can clip asymmetrically at the right/bottom
-                // pixel boundary. The ring is filled last, above the surface.
-                let _ = GdipAddPathPath(ring, path, false);
-                let _ = GdipAddPathPath(ring, inner, false);
-                let mut border_brush: *mut GpSolidFill = std::ptr::null_mut();
-                if GdipCreateSolidFill(colorref_to_argb(color), &mut border_brush).0 == 0 {
-                    let _ = GdipFillPath(graphics, border_brush.cast::<GpBrush>(), ring);
-                    let _ = GdipDeleteBrush(border_brush.cast::<GpBrush>());
-                }
-                let _ = GdipDeletePath(ring);
+            // Draw the complete outer rounded rectangle first.
+            let mut border_brush: *mut GpSolidFill = std::ptr::null_mut();
+            if GdipCreateSolidFill(colorref_to_argb(border_color), &mut border_brush).0 == 0 {
+                let _ = GdipFillPath(graphics, border_brush.cast::<GpBrush>(), outer);
+                let _ = GdipDeleteBrush(border_brush.cast::<GpBrush>());
             }
+
+            // Draw the white surface second, inset equally on all four sides.
+            // Both rectangles therefore have exactly the same center point.
+            let inner = rounded_surface_path(bounds, radius, border_width as f32);
             if !inner.is_null() {
+                let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
+                if GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0 {
+                    let _ = GdipFillPath(graphics, surface_brush.cast::<GpBrush>(), inner);
+                    let _ = GdipDeleteBrush(surface_brush.cast::<GpBrush>());
+                }
                 let _ = GdipDeletePath(inner);
             }
+        } else {
+            let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
+            if GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0 {
+                let _ = GdipFillPath(graphics, surface_brush.cast::<GpBrush>(), outer);
+                let _ = GdipDeleteBrush(surface_brush.cast::<GpBrush>());
+            }
         }
-        let _ = GdipDeletePath(path);
+        let _ = GdipDeletePath(outer);
     });
 }
 
@@ -1812,7 +1814,7 @@ unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_ra
     let region = if radius == 0 {
         unsafe { CreateRectRgn(0, 0, width, height) }
     } else {
-        unsafe { CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2) }
+        unsafe { CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2) }
     };
     if !region.is_invalid() {
         // SetWindowRgn takes ownership of the region on success.
