@@ -233,15 +233,7 @@ impl CandidateWindow {
         if hwnd.is_invalid() {
             return Err("CreateWindowExW failed".into());
         }
-        let native_shadow = DWMNCRP_DISABLED;
-        let _ = unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_NCRENDERING_POLICY,
-                std::ptr::from_ref(&native_shadow).cast::<c_void>(),
-                std::mem::size_of_val(&native_shadow) as u32,
-            )
-        };
+        disable_native_shadow(hwnd);
 
         let shadow_hwnd = unsafe {
             CreateWindowExW(
@@ -264,6 +256,7 @@ impl CandidateWindow {
             )
         }
         .map_err(|e| format!("Create shadow window: {e}"))?;
+        disable_native_shadow(shadow_hwnd);
         ctx.shadow_hwnd.set(shadow_hwnd);
 
         let ctx_ptr = Box::into_raw(ctx);
@@ -867,7 +860,7 @@ unsafe fn update_shadow_window(
 ) {
     let blur = config.style.layout.shadow_radius.max(0);
     let opacity = config.style.layout.shadow_opacity.clamp(0, 100);
-    if hwnd.is_invalid() || blur == 0 || opacity == 0 {
+    if hwnd.is_invalid() || !config.style.layout.shadow_enabled || blur == 0 || opacity == 0 {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
@@ -1005,7 +998,10 @@ fn render_shadow_pixels(pixels: &mut [u32], key: ShadowKey, extent: i32) {
             let distance = (qx * qx + qy * qy).sqrt() - corner;
             let outside = distance.max(0.0);
             let peak_alpha = key.opacity as f32 * 2.55;
-            let alpha = (peak_alpha * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
+            // A Gaussian-blurred opaque shape has half its source opacity at
+            // the geometric edge. Starting at the full configured opacity
+            // creates a visibly hard outline unlike CSS box-shadow.
+            let alpha = (peak_alpha * 0.5 * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
                 .round()
                 .clamp(0.0, 255.0) as u32;
             let premultiply = |channel: u8| (channel as u32 * alpha + 127) / 255;
@@ -1728,6 +1724,25 @@ unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_ra
             }
         }
     }
+    // SetWindowRgn can make DWM reconsider non-client rendering. Reassert the
+    // policy after every shape update so Windows never adds a second,
+    // down-right system shadow around the custom shadow.
+    disable_native_shadow(hwnd);
+}
+
+fn disable_native_shadow(hwnd: HWND) {
+    if hwnd.is_invalid() {
+        return;
+    }
+    let policy = DWMNCRP_DISABLED;
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            std::ptr::from_ref(&policy).cast::<c_void>(),
+            std::mem::size_of_val(&policy) as u32,
+        )
+    };
 }
 
 fn clamped_corner_radius(width: i32, height: i32, configured_radius: i32) -> i32 {
@@ -2031,6 +2046,28 @@ mod tests {
     fn corner_radius_is_clamped_to_half_height() {
         assert_eq!(clamped_corner_radius(300, 40, 100), 20);
         assert_eq!(clamped_corner_radius(300, 40, -1), 0);
+    }
+
+    #[test]
+    fn shadow_edge_is_soft_and_respects_configured_opacity() {
+        let extent = 24;
+        let key = ShadowKey {
+            width: 68,
+            height: 68,
+            body_width: 20,
+            body_height: 20,
+            blur: 12,
+            corner: 0,
+            color: 0,
+            opacity: 40,
+        };
+        let mut pixels = vec![0; (key.width * key.height) as usize];
+        render_shadow_pixels(&mut pixels, key, extent);
+        let alpha = |x: i32, y: i32| pixels[(y * key.width + x) as usize] >> 24;
+        let edge = alpha(extent, extent + key.body_height / 2);
+        let outside = alpha(extent - key.blur, extent + key.body_height / 2);
+        assert!((50..=51).contains(&edge));
+        assert!(outside < edge);
     }
 
     #[test]

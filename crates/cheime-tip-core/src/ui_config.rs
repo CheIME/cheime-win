@@ -105,6 +105,8 @@ pub struct LayoutConfig {
     pub mark_height: i32,
     #[serde(default = "mark_gap")]
     pub mark_gap: i32,
+    #[serde(default = "bool_true")]
+    pub shadow_enabled: bool,
     #[serde(default)]
     pub shadow_radius: i32,
     #[serde(default = "shadow_opacity")]
@@ -358,6 +360,7 @@ impl Default for LayoutConfig {
             mark_width: mark_width(),
             mark_height: mark_height(),
             mark_gap: mark_gap(),
+            shadow_enabled: true,
             shadow_radius: 0,
             shadow_opacity: shadow_opacity(),
             shadow_offset_x: 0,
@@ -559,6 +562,7 @@ mod tests {
         let yaml = "style:\n  layout:\n    shadow_radius: 12\n";
         let parsed: UiConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.style.layout.shadow_radius, 12);
+        assert!(parsed.style.layout.shadow_enabled);
         assert_eq!(parsed.style.layout.shadow_opacity, 28);
         assert_eq!(parsed.style.layout.shadow_offset_x, 0);
         assert_eq!(parsed.style.layout.shadow_offset_y, 0);
