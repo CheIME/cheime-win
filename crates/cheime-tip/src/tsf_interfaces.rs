@@ -1460,10 +1460,52 @@ static TEXT_EDIT_VTBL: ITfTextEditSink_Vtbl = ITfTextEditSink_Vtbl {
 };
 
 unsafe extern "system" fn composition_terminated(
-    _: *mut c_void,
+    this: *mut c_void,
     _: u32,
     _: *mut c_void,
 ) -> HRESULT {
+    if this.is_null() {
+        return E_POINTER;
+    }
+    let owner = unsafe { owner_from_composition(this) };
+    let externally_terminated = unsafe { (*owner).candidate_window.try_borrow() }
+        .ok()
+        .and_then(|candidate| candidate.as_ref().map(|window| window.ctx_ptr))
+        .filter(|ctx| !ctx.is_null())
+        .is_some_and(|ctx| {
+            let ctx = unsafe { &*ctx };
+            let tracked = ctx
+                .composition
+                .lock()
+                .is_ok_and(|mut composition| composition.take().is_some());
+            if tracked {
+                let _ = ctx.channel.try_send(FrontendMessage::UiCommand {
+                    header: cheime_protocol::MessageHeader {
+                        protocol_version: cheime_model::CORE_PROTOCOL_VERSION,
+                        client: cheime_model::ClientInstanceId::new(1),
+                        session: cheime_model::SessionId::new(1),
+                        epoch: cheime_model::SessionEpoch::new(1),
+                        sequence: cheime_model::Sequence::new(0),
+                        revision: cheime_model::Revision::new(0),
+                        deployment: cheime_model::DeploymentGeneration::new(1),
+                    },
+                    command: cheime_model::UiCommand::Dismiss,
+                });
+            }
+            tracked
+        });
+    if externally_terminated {
+        unsafe {
+            (*owner).has_composition.set(false);
+            disarm_rollback(owner, GuardEvent::Navigation);
+        }
+        if let Ok(candidate) = unsafe { (*owner).candidate_window.try_borrow() } {
+            if let Some(candidate) = candidate.as_ref() {
+                candidate.hide();
+            }
+        }
+        tsf_log("[CheIME] host terminated composition; cleared tracked state");
+    }
     S_OK
 }
 
