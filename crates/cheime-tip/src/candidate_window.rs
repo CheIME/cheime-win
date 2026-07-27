@@ -95,6 +95,7 @@ pub struct WindowContext {
     pub composition: Mutex<Option<ITfComposition>>,
     pub composition_sink: *mut c_void,
     pub shadow_hwnd: Cell<HWND>,
+    pub outline_hwnd: Cell<HWND>,
     pub selection_gate: Mutex<Option<(cheime_model::SessionEpoch, cheime_model::Revision)>>,
     pub rollback_guard: Mutex<RollbackGuard>,
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
@@ -109,6 +110,12 @@ impl Drop for WindowContext {
         if !shadow.is_invalid() {
             unsafe {
                 let _ = DestroyWindow(shadow);
+            }
+        }
+        let outline = self.outline_hwnd.get();
+        if !outline.is_invalid() {
+            unsafe {
+                let _ = DestroyWindow(outline);
             }
         }
         if let Ok(state) = self.render.get_mut() {
@@ -260,6 +267,30 @@ impl CandidateWindow {
         disable_native_shadow(shadow_hwnd);
         ctx.shadow_hwnd.set(shadow_hwnd);
 
+        let outline_hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST,
+                windows::core::PCWSTR::from_raw(class_wide.as_ptr()),
+                windows::core::w!("CheIME Outline"),
+                WS_POPUP,
+                -1000,
+                -1000,
+                1,
+                1,
+                HWND(std::ptr::null_mut()),
+                HMENU(std::ptr::null_mut()),
+                HINSTANCE(hinst.0),
+                None,
+            )
+        }
+        .map_err(|e| format!("Create outline window: {e}"))?;
+        disable_native_shadow(outline_hwnd);
+        ctx.outline_hwnd.set(outline_hwnd);
+
         let ctx_ptr = Box::into_raw(ctx);
         unsafe {
             SetWindowLongPtrW(
@@ -278,6 +309,7 @@ impl CandidateWindow {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
             if !self.ctx_ptr.is_null() {
                 let _ = ShowWindow((*self.ctx_ptr).shadow_hwnd.get(), SW_HIDE);
+                let _ = ShowWindow((*self.ctx_ptr).outline_hwnd.get(), SW_HIDE);
             }
         }
     }
@@ -316,6 +348,7 @@ impl CandidateWindow {
             composition: Mutex::new(None),
             composition_sink,
             shadow_hwnd: Cell::new(HWND(std::ptr::null_mut())),
+            outline_hwnd: Cell::new(HWND(std::ptr::null_mut())),
             selection_gate: Mutex::new(None),
             rollback_guard: Mutex::new(RollbackGuard::default()),
             rollback_anchor: Mutex::new(None),
@@ -487,10 +520,12 @@ unsafe extern "system" fn candidate_window_proc(
                 if !status.0 {
                     if let Some(ctx) = ctx() {
                         ctx.disarm_rollback(GuardEvent::FocusChanged);
+                        unsafe {
+                            let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
+                            let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
+                        }
                     }
-                    unsafe {
-                        let _ = ShowWindow(hwnd, SW_HIDE);
-                    }
+                    unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
                 }
             }
             LRESULT(0)
@@ -519,14 +554,12 @@ fn draw_window_surface(
     hdc: HDC,
     bounds: RECT,
     config: &UiConfig,
-    dark_mode: bool,
+    _dark_mode: bool,
     background: COLORREF,
 ) {
-    let outline = parse_hex(&config.active_scheme(dark_mode).border_color)
-        .unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) }));
     // Compatible bitmaps have undefined initial pixels. Clear the entire
-    // buffer with the bottom outline layer before antialiased drawing.
-    let clear_brush = unsafe { CreateSolidBrush(outline) };
+    // buffer before drawing the antialiased white surface.
+    let clear_brush = unsafe { CreateSolidBrush(background) };
     if !clear_brush.is_invalid() {
         unsafe {
             let _ = FillRect(hdc, &bounds, clear_brush);
@@ -534,18 +567,8 @@ fn draw_window_surface(
         }
     }
     with_antialiased_graphics(hdc, |graphics| unsafe {
-        let outer_radius =
-            config.style.layout.corner_radius.max(0) as f32 + WINDOW_OUTLINE as f32;
-        let outer = rounded_surface_path(bounds, outer_radius, 0.0);
-        if outer.is_null() {
-            return;
-        }
-        let mut outline_brush: *mut GpSolidFill = std::ptr::null_mut();
-        if GdipCreateSolidFill(colorref_to_argb(outline), &mut outline_brush).0 == 0 {
-            let _ = GdipFillPath(graphics, outline_brush.cast::<GpBrush>(), outer);
-            let _ = GdipDeleteBrush(outline_brush.cast::<GpBrush>());
-        }
-        let surface = rounded_surface_path(bounds, outer_radius, WINDOW_OUTLINE as f32);
+        let radius = config.style.layout.corner_radius.max(0) as f32;
+        let surface = rounded_surface_path(bounds, radius, 0.0);
         let mut surface_brush: *mut GpSolidFill = std::ptr::null_mut();
         if !surface.is_null()
             && GdipCreateSolidFill(colorref_to_argb(background), &mut surface_brush).0 == 0
@@ -556,7 +579,6 @@ fn draw_window_surface(
         if !surface.is_null() {
             let _ = GdipDeletePath(surface);
         }
-        let _ = GdipDeletePath(outer);
     });
 }
 
@@ -766,13 +788,11 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         // horizontal layouts can grow substantially when a longer phrase
         // appears. Screen-work-area fitting below keeps the resulting window
         // visible without truncating its rows.
-        let surface_width = content_width.max(cfg.style.layout.min_width).max(1);
+        let window_width = content_width.max(cfg.style.layout.min_width).max(1);
         if cfg.style.layout.r#type == LayoutType::Vertical {
-            stretch_vertical_candidate_rows(&mut rows, surface_width, cfg.style.layout.margin_x);
+            stretch_vertical_candidate_rows(&mut rows, window_width, cfg.style.layout.margin_x);
         }
-        offset_rows(&mut rows, WINDOW_OUTLINE, WINDOW_OUTLINE);
-        let window_width = surface_width + WINDOW_OUTLINE * 2;
-        let window_height = content_height.max(1) + WINDOW_OUTLINE * 2;
+        let window_height = content_height.max(1);
         // Sync has_composition from engine preedit
         if !ctx.tip.is_null() {
             unsafe {
@@ -785,6 +805,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
+                let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
             }
             return LRESULT(0);
         }
@@ -809,8 +830,8 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 )
             });
         let (x, y) = fit_candidate_to_work_area(
-            anchor_x - WINDOW_OUTLINE,
-            anchor_y - WINDOW_OUTLINE,
+            anchor_x,
+            anchor_y,
             window_width,
             cfg.style.layout.screen_edge_margin,
         );
@@ -825,6 +846,15 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 cfg,
                 dark_mode,
                 &ctx.shadow_pixels,
+            );
+            update_outline_window(
+                ctx.outline_hwnd.get(),
+                x,
+                y,
+                window_width,
+                window_height,
+                cfg,
+                dark_mode,
             );
             let _ = SetWindowPos(
                 hwnd,
@@ -941,7 +971,7 @@ unsafe fn update_shadow_window(
         body_width,
         body_height,
         blur,
-        corner: config.style.layout.corner_radius.max(0) + WINDOW_OUTLINE,
+        corner: config.style.layout.corner_radius.max(0),
         color: color.0,
         opacity,
     };
@@ -1011,6 +1041,140 @@ unsafe fn update_shadow_window(
     }
 }
 
+unsafe fn update_outline_window(
+    hwnd: HWND,
+    body_x: i32,
+    body_y: i32,
+    body_width: i32,
+    body_height: i32,
+    config: &UiConfig,
+    dark_mode: bool,
+) {
+    if hwnd.is_invalid() {
+        return;
+    }
+    let width = body_width.saturating_add(WINDOW_OUTLINE * 2).max(1);
+    let height = body_height.saturating_add(WINDOW_OUTLINE * 2).max(1);
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (width as u32)
+                .saturating_mul(height as u32)
+                .saturating_mul(4),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.is_invalid() {
+        return;
+    }
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let bitmap =
+        match unsafe { CreateDIBSection(dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) } {
+            Ok(bitmap) => bitmap,
+            Err(_) => {
+                unsafe {
+                    let _ = DeleteDC(dc);
+                }
+                return;
+            }
+        };
+    let old = unsafe { SelectObject(dc, bitmap) };
+    let color = parse_hex(&config.active_scheme(dark_mode).border_color).unwrap_or(COLORREF(0));
+    let pixels =
+        unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), (width * height) as usize) };
+    render_outline_pixels(
+        pixels,
+        width,
+        height,
+        config.style.layout.corner_radius.max(0) + WINDOW_OUTLINE,
+        color.0,
+    );
+
+    let destination = POINT {
+        x: body_x - WINDOW_OUTLINE,
+        y: body_y - WINDOW_OUTLINE,
+    };
+    let size = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let source = POINT::default();
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let _ = unsafe {
+        UpdateLayeredWindow(
+            hwnd,
+            None,
+            Some(&destination),
+            Some(&size),
+            dc,
+            Some(&source),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        )
+    };
+    unsafe {
+        let _ = SelectObject(dc, old);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(dc);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            destination.x,
+            destination.y,
+            width,
+            height,
+            SWP_NOACTIVATE,
+        );
+        if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+}
+
+fn render_outline_pixels(pixels: &mut [u32], width: i32, height: i32, radius: i32, color: u32) {
+    let red = (color & 0xff) as u8;
+    let green = ((color >> 8) & 0xff) as u8;
+    let blue = ((color >> 16) & 0xff) as u8;
+    let radius = radius.max(0) as f32;
+    let half_w = width as f32 / 2.0;
+    let half_h = height as f32 / 2.0;
+    let corner = radius.min(half_w).min(half_h);
+    const SAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
+    for py in 0..height {
+        for px in 0..width {
+            let mut covered = 0u32;
+            for sy in SAMPLES {
+                for sx in SAMPLES {
+                    let qx = ((px as f32 + sx - half_w).abs() - (half_w - corner)).max(0.0);
+                    let qy = ((py as f32 + sy - half_h).abs() - (half_h - corner)).max(0.0);
+                    if (qx * qx + qy * qy).sqrt() <= corner {
+                        covered += 1;
+                    }
+                }
+            }
+            let alpha = (covered * 255 + 8) / 16;
+            let premultiply = |channel: u8| (channel as u32 * alpha + 127) / 255;
+            pixels[(py * width + px) as usize] = (alpha << 24)
+                | (premultiply(red) << 16)
+                | (premultiply(green) << 8)
+                | premultiply(blue);
+        }
+    }
+}
+
 fn render_shadow_pixels(pixels: &mut [u32], key: ShadowKey, extent: i32) {
     let red = (key.color & 0xff) as u8;
     let green = ((key.color >> 8) & 0xff) as u8;
@@ -1047,17 +1211,6 @@ fn stretch_vertical_candidate_rows(rows: &mut [RowRender], window_width: i32, ma
     let right = (window_width - margin_x.max(0)).max(1);
     for row in rows.iter_mut().filter(|row| row.candidate_index.is_some()) {
         row.bounds.right = right.max(row.bounds.left + 1);
-    }
-}
-
-fn offset_rows(rows: &mut [RowRender], dx: i32, dy: i32) {
-    for row in rows {
-        row.x += dx;
-        row.y += dy;
-        row.bounds.left += dx;
-        row.bounds.right += dx;
-        row.bounds.top += dy;
-        row.bounds.bottom += dy;
     }
 }
 
@@ -1160,6 +1313,7 @@ fn handle_click(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRES
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
             let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
+            let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
         }
     }
     LRESULT(0)
@@ -1809,7 +1963,7 @@ fn colorref_to_argb(color: COLORREF) -> u32 {
 }
 
 unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_radius: i32) {
-    let radius = clamped_corner_radius(width, height, configured_radius + WINDOW_OUTLINE);
+    let radius = clamped_corner_radius(width, height, configured_radius);
     let region = if radius == 0 {
         unsafe { CreateRectRgn(0, 0, width, height) }
     } else {
@@ -2193,6 +2347,25 @@ mod tests {
         let outside = alpha(extent - key.blur, extent + key.body_height / 2);
         assert!((50..=51).contains(&edge));
         assert!(outside < edge);
+    }
+
+    #[test]
+    fn outline_bitmap_is_symmetric_on_all_four_sides() {
+        let width = 42;
+        let height = 24;
+        let mut pixels = vec![0; (width * height) as usize];
+        render_outline_pixels(&mut pixels, width, height, 9, 0x00d1d1d1);
+        let alpha = |x: i32, y: i32| pixels[(y * width + x) as usize] >> 24;
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(alpha(x, y), alpha(width - 1 - x, y));
+                assert_eq!(alpha(x, y), alpha(x, height - 1 - y));
+            }
+        }
+        assert_eq!(alpha(0, height / 2), 255);
+        assert_eq!(alpha(width - 1, height / 2), 255);
+        assert_eq!(alpha(width / 2, 0), 255);
+        assert_eq!(alpha(width / 2, height - 1), 255);
     }
 
     #[test]
