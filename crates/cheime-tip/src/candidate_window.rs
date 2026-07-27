@@ -45,7 +45,7 @@ use windows::Win32::Graphics::GdiPlus::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
-    TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC,
+    TF_ANCHOR_END, TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC, TfAnchor,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
@@ -551,9 +551,12 @@ fn draw_window_surface(
 /// Get the screen (left, bottom) of the composition text via a synchronous
 /// Get the screen position for the candidate window.
 /// Tries: (1) TSF GetTextExt, (2) GetGUIThreadInfo caret rect.
-fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
+fn get_composition_screen_rect(
+    ctx: &WindowContext,
+    inline_preedit: bool,
+) -> Option<(i32, i32)> {
     // Try 1: TSF GetTextExt via edit session
-    if let Some(pos) = try_get_text_ext(ctx) {
+    if let Some(pos) = try_get_text_ext(ctx, inline_preedit) {
         tsf_log(&format!("[CheIME] GetTextExt OK: ({}, {})", pos.0, pos.1));
         return Some(pos);
     }
@@ -613,22 +616,25 @@ fn get_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
 }
 
 /// Try GetTextExt via TSF edit session.
-/// Tries composition range first, then falls back to selection range.
-fn try_get_text_ext(ctx: &WindowContext) -> Option<(i32, i32)> {
+/// Inline preedit anchors to the start of the active composition. Non-inline
+/// mode anchors to the current selection/caret as usual.
+fn try_get_text_ext(ctx: &WindowContext, inline_preedit: bool) -> Option<(i32, i32)> {
     let doc = unsafe { ctx.thread_mgr.GetFocus() }.ok()?;
     let context = unsafe { doc.GetTop() }.ok()?;
     let view = unsafe { context.GetActiveView() }.ok()?;
 
-    // Try composition range first
-    let range = {
+    let composition_range = if inline_preedit {
         let comp_guard = ctx.composition.lock().ok()?;
         comp_guard
             .as_ref()
             .and_then(|comp| unsafe { comp.GetRange() }.ok())
+    } else {
+        None
     };
 
-    // If no composition range, use current selection range
-    let range = match range {
+    // If inline composition has not been created yet, or non-inline mode is
+    // active, use the current selection range.
+    let range = match composition_range {
         Some(r) => r,
         None => {
             use windows::Win32::UI::TextServices::{TF_DEFAULT_SELECTION, TF_SELECTION};
@@ -646,11 +652,18 @@ fn try_get_text_ext(ctx: &WindowContext) -> Option<(i32, i32)> {
         }
     };
 
-    // Collapse to start for reliable point-based extent
-    let _ = unsafe { range.Collapse(0, TF_ANCHOR_START) };
-
     let result = Cell::new(None::<RECT>);
-    let session = TextExtentSession::new(view, range, &result as *const Cell<Option<RECT>>);
+    let anchor = if inline_preedit {
+        TF_ANCHOR_START
+    } else {
+        TF_ANCHOR_END
+    };
+    let session = TextExtentSession::new(
+        view,
+        range,
+        anchor,
+        &result as *const Cell<Option<RECT>>,
+    );
     let raw = Box::into_raw(session);
     let raw_void: *mut c_void = raw.cast();
 
@@ -764,7 +777,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         }
 
         // Fix 1: Position window below composition text via GetTextExt.
-        let (anchor_x, anchor_y) = get_composition_screen_rect(ctx)
+        let (anchor_x, anchor_y) = get_composition_screen_rect(ctx, cfg.style.inline_preedit)
             .map(|(left, bottom)| {
                 (
                     left + cfg.style.layout.caret_offset_x,
@@ -1774,16 +1787,23 @@ struct TextExtentSession {
     ref_count: AtomicU32,
     view: ITfContextView,
     range: ITfRange,
+    anchor: TfAnchor,
     result: *const Cell<Option<RECT>>,
 }
 
 impl TextExtentSession {
-    fn new(view: ITfContextView, range: ITfRange, result: *const Cell<Option<RECT>>) -> Box<Self> {
+    fn new(
+        view: ITfContextView,
+        range: ITfRange,
+        anchor: TfAnchor,
+        result: *const Cell<Option<RECT>>,
+    ) -> Box<Self> {
         Box::new(Self {
             vtbl: &TEXT_EXTENT_VTBL,
             ref_count: AtomicU32::new(1),
             view,
             range,
+            anchor,
             result,
         })
     }
@@ -1852,6 +1872,9 @@ unsafe extern "system" fn tes_do_edit_session(this: *mut c_void, ec: u32) -> HRE
     let session = unsafe { &*(this as *const TextExtentSession) };
     let mut rect = RECT::default();
     let mut clipped = BOOL(0);
+    if unsafe { session.range.Collapse(ec, session.anchor) }.is_err() {
+        return S_OK;
+    }
     let hr = unsafe {
         session
             .view
