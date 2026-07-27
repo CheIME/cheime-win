@@ -334,51 +334,7 @@ fn handle_set_preedit(
 }
 
 fn format_inline_pinyin(input: &str) -> String {
-    if input.is_empty()
-        || input.contains('\'')
-        || !input.bytes().all(|byte| byte.is_ascii_lowercase())
-    {
-        return input.to_owned();
-    }
-    fn split_from(input: &str, start: usize, parts: &mut Vec<String>) -> bool {
-        if start == input.len() {
-            return true;
-        }
-        for end in (start + 1..=input.len()).rev() {
-            let syllable = &input[start..end];
-            if is_pinyin_syllable(syllable) {
-                parts.push(syllable.to_owned());
-                if split_from(input, end, parts) {
-                    return true;
-                }
-                parts.pop();
-            }
-        }
-        false
-    }
-    let mut parts = Vec::new();
-    if split_from(input, 0, &mut parts) && parts.len() > 1 {
-        parts.join("'")
-    } else {
-        input.to_owned()
-    }
-}
-
-fn is_pinyin_syllable(value: &str) -> bool {
-    const INITIALS: &[&str] = &[
-        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
-        "r", "z", "c", "s", "y", "w", "",
-    ];
-    const FINALS: &[&str] = &[
-        "iang", "iong", "uang", "ueng", "ang", "eng", "ing", "ong", "iao", "ian", "uan", "uai",
-        "uei", "uen", "van", "ve", "ai", "ei", "ao", "ou", "an", "en", "in", "un", "vn", "ia",
-        "ie", "ua", "uo", "ui", "iu", "er", "a", "o", "e", "i", "u", "v",
-    ];
-    INITIALS.iter().any(|initial| {
-        value
-            .strip_prefix(initial)
-            .is_some_and(|final_part| FINALS.contains(&final_part))
-    })
+    input.to_owned()
 }
 
 #[cfg(test)]
@@ -386,9 +342,9 @@ mod inline_pinyin_tests {
     use super::format_inline_pinyin;
 
     #[test]
-    fn inserts_visible_syllable_boundaries() {
-        assert_eq!(format_inline_pinyin("nihao"), "ni'hao");
-        assert_eq!(format_inline_pinyin("zhongguo"), "zhong'guo");
+    fn preserves_engine_supplied_preedit_exactly() {
+        assert_eq!(format_inline_pinyin("nihao"), "nihao");
+        assert_eq!(format_inline_pinyin("zhongguo"), "zhongguo");
         assert_eq!(format_inline_pinyin("xian"), "xian");
         assert_eq!(format_inline_pinyin("ni'hao"), "ni'hao");
     }

@@ -243,7 +243,7 @@ fn dispatch_engine_message(
         EngineMessage::CandidateSnapshot { snapshot, .. } => {
             if let Some(mut posted) = pending_preedit.take() {
                 if let PlatformActionKind::SetPreedit { text, cursor } = &mut posted.action.kind {
-                    let synchronized = synchronized_preedit(&snapshot);
+                    let synchronized = synchronized_preedit(text, &snapshot);
                     *cursor = synchronized.chars().count();
                     *text = synchronized;
                 }
@@ -279,8 +279,8 @@ fn dispatch_engine_message(
     Ok(())
 }
 
-fn synchronized_preedit(snapshot: &CandidateSnapshot) -> String {
-    snapshot
+fn synchronized_preedit(raw_input: &str, snapshot: &CandidateSnapshot) -> String {
+    let annotation = snapshot
         .highlighted
         .and_then(|id| {
             snapshot
@@ -289,9 +289,22 @@ fn synchronized_preedit(snapshot: &CandidateSnapshot) -> String {
                 .find(|candidate| candidate.id == id)
         })
         .and_then(|candidate| candidate.annotation.as_ref())
-        .filter(|annotation| !annotation.is_empty())
-        .cloned()
-        .unwrap_or_else(|| snapshot.preedit.clone())
+        .map(String::as_str);
+    annotation
+        .filter(|annotation| annotation_only_adds_separators(raw_input, annotation))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| raw_input.to_owned())
+}
+
+fn annotation_only_adds_separators(raw_input: &str, annotation: &str) -> bool {
+    !annotation.is_empty()
+        && annotation
+            .chars()
+            .all(|character| character == '\'' || character.is_ascii_lowercase())
+        && annotation
+            .chars()
+            .filter(|character| *character != '\'')
+            .eq(raw_input.chars())
 }
 
 fn try_connect(
@@ -671,7 +684,17 @@ mod phase2_tests {
             highlighted: Some(highlighted),
             status: SessionStatus::Composing,
         };
-        assert_eq!(synchronized_preedit(&snapshot), "ha'o'de");
+        assert_eq!(synchronized_preedit("haode", &snapshot), "ha'o'de");
+        assert_eq!(synchronized_preedit("hao", &snapshot), "hao");
+    }
+
+    #[test]
+    fn annotation_may_only_insert_apostrophe_separators() {
+        assert!(annotation_only_adds_separators("haode", "ha'o'de"));
+        assert!(!annotation_only_adds_separators("hao", "ha'o'de"));
+        assert!(!annotation_only_adds_separators("haode", "hao de"));
+        assert!(!annotation_only_adds_separators("haode", "hao2de"));
+        assert!(!annotation_only_adds_separators("haode", "haodex"));
     }
 
     #[test]
