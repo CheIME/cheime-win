@@ -107,6 +107,8 @@ pub struct LayoutConfig {
     pub mark_gap: i32,
     #[serde(default)]
     pub shadow_radius: i32,
+    #[serde(default = "shadow_opacity")]
+    pub shadow_opacity: i32,
     #[serde(default)]
     pub shadow_offset_x: i32,
     #[serde(default = "caret_offset_y")]
@@ -357,8 +359,9 @@ impl Default for LayoutConfig {
             mark_height: mark_height(),
             mark_gap: mark_gap(),
             shadow_radius: 0,
+            shadow_opacity: shadow_opacity(),
             shadow_offset_x: 0,
-            shadow_offset_y: caret_offset_y(),
+            shadow_offset_y: 0,
             caret_offset_x: 0,
             caret_offset_y: caret_offset_y(),
             screen_edge_margin: screen_edge_margin(),
@@ -476,6 +479,9 @@ fn mark_gap() -> i32 {
 }
 fn caret_offset_y() -> i32 {
     8
+}
+fn shadow_opacity() -> i32 {
+    28
 }
 fn screen_edge_margin() -> i32 {
     12

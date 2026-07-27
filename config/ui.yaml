@@ -45,6 +45,7 @@ style:
     mark_height: 18
     mark_gap: 6
     shadow_radius: 0
+    shadow_opacity: 28
     shadow_offset_x: 0
     shadow_offset_y: 4
     caret_offset_x: 0

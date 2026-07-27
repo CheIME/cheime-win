@@ -300,7 +300,7 @@ fn project_separators(raw_input: &str, annotation: &str) -> String {
     let mut matched = 0usize;
     let mut separators = Vec::new();
     for character in annotation.chars() {
-        if character == '\'' {
+        if matches!(character, '\'' | '’' | '‘' | ' ' | '\t') {
             if matched > 0 && matched < raw.len() {
                 separators.push(matched);
             }
@@ -705,6 +705,9 @@ mod phase2_tests {
     #[test]
     fn annotation_only_projects_apostrophe_separators() {
         assert_eq!(project_separators("haode", "ha'o'de"), "ha'o'de");
+        assert_eq!(project_separators("haode", "hao de"), "hao'de");
+        assert_eq!(project_separators("haode", "ha o de"), "ha'o'de");
+        assert_eq!(project_separators("haode", "hao’de"), "hao'de");
         assert_eq!(project_separators("hao", "ha'o'de"), "ha'o");
         assert_eq!(
             project_separators("haode", "prefix ha'o'de suffix"),

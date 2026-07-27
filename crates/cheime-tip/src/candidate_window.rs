@@ -21,6 +21,9 @@ use std::sync::mpsc::SyncSender;
 use windows::Win32::Foundation::{
     BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
+use windows::Win32::Graphics::Dwm::{
+    DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
     BLENDFUNCTION, BeginPaint, BitBlt, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
@@ -136,6 +139,7 @@ struct ShadowKey {
     blur: i32,
     corner: i32,
     color: u32,
+    opacity: i32,
 }
 
 struct ShadowPixels {
@@ -229,6 +233,15 @@ impl CandidateWindow {
         if hwnd.is_invalid() {
             return Err("CreateWindowExW failed".into());
         }
+        let native_shadow = DWMNCRP_DISABLED;
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_NCRENDERING_POLICY,
+                std::ptr::from_ref(&native_shadow).cast::<c_void>(),
+                std::mem::size_of_val(&native_shadow) as u32,
+            )
+        };
 
         let shadow_hwnd = unsafe {
             CreateWindowExW(
@@ -853,7 +866,8 @@ unsafe fn update_shadow_window(
     cache: &Mutex<Option<ShadowPixels>>,
 ) {
     let blur = config.style.layout.shadow_radius.max(0);
-    if hwnd.is_invalid() || blur == 0 {
+    let opacity = config.style.layout.shadow_opacity.clamp(0, 100);
+    if hwnd.is_invalid() || blur == 0 || opacity == 0 {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
@@ -906,6 +920,7 @@ unsafe fn update_shadow_window(
         blur,
         corner: config.style.layout.corner_radius.max(0),
         color: color.0,
+        opacity,
     };
     let cache_hit = cache.lock().is_ok_and(|guard| {
         guard
@@ -989,7 +1004,8 @@ fn render_shadow_pixels(pixels: &mut [u32], key: ShadowKey, extent: i32) {
             let qy = ((py as f32 + 0.5 - center_y).abs() - (half_h - corner)).max(0.0);
             let distance = (qx * qx + qy * qy).sqrt() - corner;
             let outside = distance.max(0.0);
-            let alpha = (72.0 * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
+            let peak_alpha = key.opacity as f32 * 2.55;
+            let alpha = (peak_alpha * (-(outside * outside) / (2.0 * sigma * sigma)).exp())
                 .round()
                 .clamp(0.0, 255.0) as u32;
             let premultiply = |channel: u8| (channel as u32 * alpha + 127) / 255;
