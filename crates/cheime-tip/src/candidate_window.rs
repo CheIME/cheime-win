@@ -36,11 +36,11 @@ use windows::Win32::Graphics::Gdi::{
     TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    FillModeAlternate, GdipAddPathArc, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC,
-    GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
-    GdipDeletePath, GdipDeletePen, GdipDrawPath, GdipFillPath, GdipSetSmoothingMode,
-    GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
-    SmoothingModeAntiAlias8x8, UnitPixel,
+    FillModeAlternate, GdipAddPathArc, GdipAddPathArcI, GdipAddPathPath, GdipClosePathFigure,
+    GdipCreateFromHDC, GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush,
+    GdipDeleteGraphics, GdipDeletePath, GdipDeletePen, GdipDrawPath, GdipFillPath,
+    GdipSetSmoothingMode, GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen,
+    GpSolidFill, SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
@@ -533,9 +533,8 @@ fn draw_window_surface(
     }
     with_antialiased_graphics(hdc, |graphics| unsafe {
         let border_width = config.style.layout.border_width.max(0);
-        let stroke_inset = border_width as f32 / 2.0;
         let radius = config.style.layout.corner_radius.max(0) as f32;
-        let path = rounded_surface_path(bounds, radius, stroke_inset);
+        let path = rounded_surface_path(bounds, radius, 0.0);
         if path.is_null() {
             return;
         }
@@ -547,19 +546,26 @@ fn draw_window_surface(
         if border_width > 0 {
             let color = parse_hex(&config.active_scheme(dark_mode).border_color)
                 .unwrap_or(COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-            let mut pen: *mut GpPen = std::ptr::null_mut();
-            if GdipCreatePen1(
-                colorref_to_argb(color),
-                border_width as f32,
-                UnitPixel,
-                &mut pen,
-            )
-            .0 == 0
+            let inner = rounded_surface_path(bounds, radius, border_width as f32);
+            let mut ring: *mut GpPath = std::ptr::null_mut();
+            if !inner.is_null()
+                && GdipCreatePath(FillModeAlternate, &mut ring).0 == 0
+                && !ring.is_null()
             {
-                // The stroke is centered on the same floating-point path as
-                // the fill and is deliberately drawn last, above the fill.
-                let _ = GdipDrawPath(graphics, pen, path);
-                let _ = GdipDeletePen(pen);
+                // Build a real border ring instead of relying on a centered
+                // pen that GDI+ can clip asymmetrically at the right/bottom
+                // pixel boundary. The ring is filled last, above the surface.
+                let _ = GdipAddPathPath(ring, path, false);
+                let _ = GdipAddPathPath(ring, inner, false);
+                let mut border_brush: *mut GpSolidFill = std::ptr::null_mut();
+                if GdipCreateSolidFill(colorref_to_argb(color), &mut border_brush).0 == 0 {
+                    let _ = GdipFillPath(graphics, border_brush.cast::<GpBrush>(), ring);
+                    let _ = GdipDeleteBrush(border_brush.cast::<GpBrush>());
+                }
+                let _ = GdipDeletePath(ring);
+            }
+            if !inner.is_null() {
+                let _ = GdipDeletePath(inner);
             }
         }
         let _ = GdipDeletePath(path);
