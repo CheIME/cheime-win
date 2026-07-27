@@ -111,7 +111,7 @@ pub struct LayoutConfig {
     pub shadow_opacity: i32,
     #[serde(default)]
     pub shadow_offset_x: i32,
-    #[serde(default = "caret_offset_y")]
+    #[serde(default)]
     pub shadow_offset_y: i32,
     #[serde(default)]
     pub caret_offset_x: i32,
@@ -552,5 +552,15 @@ mod tests {
     fn unknown_fields_are_rejected() {
         let yaml = "style:\n  bogus: true\n";
         assert!(serde_yaml::from_str::<UiConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn missing_shadow_fields_use_rendering_defaults() {
+        let yaml = "style:\n  layout:\n    shadow_radius: 12\n";
+        let parsed: UiConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.style.layout.shadow_radius, 12);
+        assert_eq!(parsed.style.layout.shadow_opacity, 28);
+        assert_eq!(parsed.style.layout.shadow_offset_x, 0);
+        assert_eq!(parsed.style.layout.shadow_offset_y, 0);
     }
 }
