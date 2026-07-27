@@ -662,6 +662,7 @@ fn try_get_text_ext(ctx: &WindowContext, inline_preedit: bool) -> Option<(i32, i
         view,
         range,
         anchor,
+        inline_preedit,
         &result as *const Cell<Option<RECT>>,
     );
     let raw = Box::into_raw(session);
@@ -1788,6 +1789,7 @@ struct TextExtentSession {
     view: ITfContextView,
     range: ITfRange,
     anchor: TfAnchor,
+    include_first_character: bool,
     result: *const Cell<Option<RECT>>,
 }
 
@@ -1796,6 +1798,7 @@ impl TextExtentSession {
         view: ITfContextView,
         range: ITfRange,
         anchor: TfAnchor,
+        include_first_character: bool,
         result: *const Cell<Option<RECT>>,
     ) -> Box<Self> {
         Box::new(Self {
@@ -1804,6 +1807,7 @@ impl TextExtentSession {
             view,
             range,
             anchor,
+            include_first_character,
             result,
         })
     }
@@ -1874,6 +1878,19 @@ unsafe extern "system" fn tes_do_edit_session(this: *mut c_void, ec: u32) -> HRE
     let mut clipped = BOOL(0);
     if unsafe { session.range.Collapse(ec, session.anchor) }.is_err() {
         return S_OK;
+    }
+    if session.include_first_character {
+        let mut shifted = 0;
+        if unsafe {
+            session
+                .range
+                .ShiftEnd(ec, 1, &mut shifted, std::ptr::null())
+        }
+        .is_err()
+            || shifted != 1
+        {
+            return S_OK;
+        }
     }
     let hr = unsafe {
         session
