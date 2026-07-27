@@ -66,7 +66,22 @@ if ($profileKey -ne $null) {
 }
 
 Write-Host "  TIP registration verified" -ForegroundColor Green
+
+# Start the per-user engine at sign-in. Quote both paths because LOCALAPPDATA
+# and dictionary directories may contain spaces. New-ItemProperty -Force makes
+# repeated installs update the same value instead of creating duplicates.
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$enginePath = Join-Path $binDir "cheime-engine.exe"
+$engineCommand = "`"$enginePath`" --dict-dir `"$dataDir`""
+New-ItemProperty -LiteralPath $runKey -Name "CheIME Engine" -Value $engineCommand -PropertyType String -Force | Out-Null
+Write-Host "  Per-user engine startup registered" -ForegroundColor Green
+
+# Make the freshly installed input method usable without requiring sign-out.
+if (-not (Get-Process -Name "cheime-engine" -ErrorAction SilentlyContinue)) {
+    Start-Process -FilePath $enginePath -ArgumentList @("--dict-dir", $dataDir) -WindowStyle Hidden
+    Write-Host "  Engine started" -ForegroundColor Green
+}
+
 Write-Host "=== Installation complete ===" -ForegroundColor Cyan
-Write-Host "To start the engine: $binDir\cheime-engine.exe --dict-dir $dataDir"
 Write-Host "To edit the UI config: $binDir\cheime-ui.exe"
 Write-Host "To uninstall: .\scripts\uninstall.ps1"

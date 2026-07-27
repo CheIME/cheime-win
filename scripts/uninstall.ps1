@@ -18,6 +18,13 @@ $cheimeDir = Join-Path $env:LOCALAPPDATA "CheIME"
 $dllPath = Join-Path $cheimeDir "bin\cheime-tip.dll"
 
 Write-Host "=== Uninstalling CheIME ===" -ForegroundColor Cyan
+
+# Remove only CheIME's own per-user startup value. This is idempotent and
+# leaves all unrelated Run entries untouched.
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+Remove-ItemProperty -LiteralPath $runKey -Name "CheIME Engine" -ErrorAction SilentlyContinue
+Get-Process -Name "cheime-engine" -ErrorAction SilentlyContinue | Stop-Process
+
 if (Test-Path -LiteralPath $dllPath -PathType Leaf) {
     $proc = Start-Process -FilePath "$env:SystemRoot\System32\regsvr32.exe" -ArgumentList @('/u', '/s', $dllPath) -Wait -PassThru -NoNewWindow
     if ($proc.ExitCode -ne 0) { throw "regsvr32 /u failed with exit code $($proc.ExitCode) for $dllPath" }
