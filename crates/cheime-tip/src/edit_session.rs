@@ -18,9 +18,9 @@ use windows::Win32::Foundation::BOOL;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::TextServices::{
     CLSID_TF_CategoryMgr, GUID_PROP_ATTRIBUTE, ITfCategoryMgr, ITfComposition, ITfCompositionSink,
-    ITfContext, ITfContextComposition, ITfEditSession, ITfEditSession_Vtbl, TF_ANCHOR_END,
-    TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_DEFAULT_SELECTION, TF_ES_READWRITE,
-    TF_ES_SYNC, TF_SELECTION,
+    ITfContext, ITfContextComposition, ITfEditSession, ITfEditSession_Vtbl, ITfInsertAtSelection,
+    TF_ANCHOR_END, TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_DEFAULT_SELECTION,
+    TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_NO_DEFAULT_COMPOSITION, TF_SELECTION,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -242,6 +242,8 @@ fn handle_set_preedit(
     action: &PlatformAction,
 ) -> HRESULT {
     let result = 'work: {
+        let display_text = format_inline_pinyin(text);
+        let text_wide: Vec<u16> = display_text.encode_utf16().collect();
         let composition_mutex = unsafe { &*composition_ptr };
         let existing = match composition_mutex.lock() {
             Ok(guard) => guard.as_ref().cloned(),
@@ -257,48 +259,37 @@ fn handle_set_preedit(
                     Err(e) => break 'work Err(format!("GetRange: {e}")),
                 }
             }
-            // No composition yet — get current selection as insertion point.
+            // Insert first and start composition over the explicit range.
+            // Some hosts do not expand a composition started on an empty
+            // selection, such as a new document or after punctuation.
             None => {
-                let mut selection = [zeroed_selection()];
-                let mut fetched = 0u32;
-                if unsafe {
-                    context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched)
-                }
-                .is_err()
-                {
-                    release_selection_range(selection);
-                    break 'work Err("GetSelection failed".into());
-                }
-                if fetched == 0 {
-                    release_selection_range(selection);
-                    break 'work Err("GetSelection fetched 0".into());
-                }
-                let sel_range = match selection[0].range.as_ref() {
-                    Some(r) => r,
-                    None => {
-                        release_selection_range(selection);
-                        break 'work Err("GetSelection returned None range".into());
+                let inserter: ITfInsertAtSelection = match context.cast() {
+                    Ok(inserter) => inserter,
+                    Err(_) => break 'work Err("cast to ITfInsertAtSelection failed".into()),
+                };
+                let inserted = match unsafe {
+                    inserter.InsertTextAtSelection(ec, TF_IAS_NO_DEFAULT_COMPOSITION, &text_wide)
+                } {
+                    Ok(range) => range,
+                    Err(error) => {
+                        break 'work Err(format!("InsertTextAtSelection: {error}"));
                     }
                 };
-                let cloned = match unsafe { sel_range.Clone() } {
-                    Ok(c) => c,
-                    Err(e) => {
-                        release_selection_range(selection);
-                        break 'work Err(format!("Clone: {e}"));
-                    }
-                };
-                release_selection_range(selection);
 
                 let ctx_comp: ITfContextComposition = match context.cast() {
                     Ok(c) => c,
-                    Err(_) => break 'work Err("cast to ITfContextComposition failed".into()),
+                    Err(_) => {
+                        let _ = unsafe { inserted.SetText(ec, 0, &[]) };
+                        break 'work Err("cast to ITfContextComposition failed".into());
+                    }
                 };
                 let Some(composition_sink) =
                     (unsafe { ITfCompositionSink::from_raw_borrowed(&composition_sink) })
                 else {
+                    let _ = unsafe { inserted.SetText(ec, 0, &[]) };
                     break 'work Err("invalid composition sink".into());
                 };
-                match unsafe { ctx_comp.StartComposition(ec, &cloned, Some(composition_sink)) } {
+                match unsafe { ctx_comp.StartComposition(ec, &inserted, Some(composition_sink)) } {
                     Ok(c) => {
                         tsf_log("[CheIME] SetPreedit: StartComposition OK");
                         let range = match unsafe { c.GetRange() } {
@@ -314,14 +305,15 @@ fn handle_set_preedit(
                         }
                         range
                     }
-                    Err(e) => break 'work Err(format!("StartComposition: {e}")),
+                    Err(e) => {
+                        let _ = unsafe { inserted.SetText(ec, 0, &[]) };
+                        break 'work Err(format!("StartComposition: {e}"));
+                    }
                 }
             }
         };
 
         // Set the preedit text into the composition range.
-        let display_text = format_inline_pinyin(text);
-        let text_wide: Vec<u16> = display_text.encode_utf16().collect();
         if unsafe { range.SetText(ec, 0, &text_wide) }.is_err() {
             break 'work Err("SetText failed".into());
         }
