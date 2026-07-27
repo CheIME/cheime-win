@@ -29,11 +29,11 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, BeginPaint, BitBlt, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
     ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetMonitorInfoW,
-    GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromPoint, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TEXTMETRICW, TRANSPARENT,
-    TextOutW,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect,
+    GetMonitorInfoW, GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, NONANTIALIASED_QUALITY,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
@@ -521,6 +521,16 @@ fn draw_window_surface(
     dark_mode: bool,
     background: COLORREF,
 ) {
+    // Compatible bitmaps have undefined initial pixels. Clear the entire
+    // buffer before drawing the antialiased rounded path so the few pixels
+    // between the GDI region and GDI+ coverage never appear as black seams.
+    let clear_brush = unsafe { CreateSolidBrush(background) };
+    if !clear_brush.is_invalid() {
+        unsafe {
+            let _ = FillRect(hdc, &bounds, clear_brush);
+            let _ = DeleteObject(clear_brush);
+        }
+    }
     with_antialiased_graphics(hdc, |graphics| unsafe {
         let radius = config.style.layout.corner_radius.max(0);
         let path = rounded_path(bounds, radius);
@@ -536,10 +546,23 @@ fn draw_window_surface(
         if width > 0 {
             let color = parse_hex(&config.active_scheme(dark_mode).border_color)
                 .unwrap_or(COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
+            let inset = (width + 1) / 2;
+            let border_bounds = RECT {
+                left: bounds.left + inset,
+                top: bounds.top + inset,
+                right: bounds.right - inset,
+                bottom: bounds.bottom - inset,
+            };
+            let border_path = rounded_path(border_bounds, (radius - inset).max(0));
             let mut pen: *mut GpPen = std::ptr::null_mut();
-            if GdipCreatePen1(colorref_to_argb(color), width as f32, UnitPixel, &mut pen).0 == 0 {
-                let _ = GdipDrawPath(graphics, pen, path);
+            if !border_path.is_null()
+                && GdipCreatePen1(colorref_to_argb(color), width as f32, UnitPixel, &mut pen).0 == 0
+            {
+                let _ = GdipDrawPath(graphics, pen, border_path);
                 let _ = GdipDeletePen(pen);
+            }
+            if !border_path.is_null() {
+                let _ = GdipDeletePath(border_path);
             }
         }
         let _ = GdipDeletePath(path);
