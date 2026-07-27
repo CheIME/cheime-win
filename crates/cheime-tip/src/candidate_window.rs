@@ -26,10 +26,11 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, BeginPaint, BitBlt, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
     ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetSysColor,
-    GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect, NONANTIALIASED_QUALITY,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
-    TEXTMETRICW, TRANSPARENT, TextOutW,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetMonitorInfoW,
+    GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromPoint, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TEXTMETRICW, TRANSPARENT,
+    TextOutW,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
@@ -757,7 +758,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         }
 
         // Fix 1: Position window below composition text via GetTextExt.
-        let (x, y) = get_composition_screen_rect(ctx)
+        let (anchor_x, anchor_y) = get_composition_screen_rect(ctx)
             .map(|(left, bottom)| {
                 (
                     left + cfg.style.layout.caret_offset_x,
@@ -771,6 +772,12 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                     cfg.style.layout.caret_offset_y,
                 )
             });
+        let (x, y) = fit_candidate_to_work_area(
+            anchor_x,
+            anchor_y,
+            window_width,
+            cfg.style.layout.screen_edge_margin,
+        );
 
         unsafe {
             update_shadow_window(
@@ -809,6 +816,30 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         }
     }
     LRESULT(0)
+}
+
+fn fit_candidate_to_work_area(x: i32, y: i32, window_width: i32, edge_margin: i32) -> (i32, i32) {
+    let point = POINT { x, y };
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if monitor.is_invalid() || !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return (x, y);
+    }
+    (
+        clamp_window_right(x, window_width, info.rcWork, edge_margin),
+        y,
+    )
+}
+
+fn clamp_window_right(x: i32, width: i32, work_area: RECT, edge_margin: i32) -> i32 {
+    let margin = edge_margin.max(0);
+    let right_limit = work_area.right.saturating_sub(margin);
+    let left_limit = work_area.left.saturating_add(margin);
+    x.min(right_limit.saturating_sub(width.max(1)))
+        .max(left_limit.min(right_limit.saturating_sub(1)))
 }
 
 unsafe fn update_shadow_window(
@@ -1945,5 +1976,29 @@ mod tests {
     fn corner_radius_is_clamped_to_half_height() {
         assert_eq!(clamped_corner_radius(300, 40, 100), 20);
         assert_eq!(clamped_corner_radius(300, 40, -1), 0);
+    }
+
+    #[test]
+    fn candidate_right_edge_stays_inside_work_area_margin() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        assert_eq!(clamp_window_right(1800, 320, work, 12), 1588);
+        assert_eq!(clamp_window_right(1000, 320, work, 12), 1000);
+    }
+
+    #[test]
+    fn candidate_clamping_supports_negative_monitor_coordinates() {
+        let work = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1040,
+        };
+        assert_eq!(clamp_window_right(-100, 320, work, 16), -336);
+        assert_eq!(clamp_window_right(-1800, 320, work, 16), -1800);
     }
 }

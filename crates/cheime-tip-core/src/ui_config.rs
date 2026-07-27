@@ -113,6 +113,8 @@ pub struct LayoutConfig {
     pub caret_offset_x: i32,
     #[serde(default = "caret_offset_y")]
     pub caret_offset_y: i32,
+    #[serde(default = "screen_edge_margin")]
+    pub screen_edge_margin: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -356,6 +358,7 @@ impl Default for LayoutConfig {
             shadow_offset_y: caret_offset_y(),
             caret_offset_x: 0,
             caret_offset_y: caret_offset_y(),
+            screen_edge_margin: screen_edge_margin(),
         }
     }
 }
@@ -470,6 +473,9 @@ fn mark_gap() -> i32 {
 }
 fn caret_offset_y() -> i32 {
     8
+}
+fn screen_edge_margin() -> i32 {
+    12
 }
 fn bool_true() -> bool {
     true
