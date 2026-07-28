@@ -10,6 +10,8 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::core::PCWSTR;
 
 const SANDBOX_LIVE_CONFIG: &str = r"C:\CheIMELiveConfig\ui.yaml";
+type ConfigFingerprint = Option<(SystemTime, u64)>;
+type ConfigCache = Option<(PathBuf, ConfigFingerprint, UiConfig)>;
 
 pub fn config_path() -> PathBuf {
     let sandbox_path = PathBuf::from(SANDBOX_LIVE_CONFIG);
@@ -27,8 +29,7 @@ pub fn config_path() -> PathBuf {
 pub fn load_config() -> UiConfig {
     let path = config_path();
     let fingerprint = std::fs::metadata(&path).ok().map(config_fingerprint);
-    static CACHE: OnceLock<Mutex<Option<(PathBuf, Option<(SystemTime, u64)>, UiConfig)>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<Mutex<ConfigCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     if let Ok(guard) = cache.lock() {
         if let Some((cached_path, cached_fingerprint, config)) = guard.as_ref() {

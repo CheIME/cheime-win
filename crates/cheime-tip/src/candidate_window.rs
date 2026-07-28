@@ -96,6 +96,7 @@ pub struct WindowContext {
     pub composition_sink: *mut c_void,
     pub shadow_hwnd: Cell<HWND>,
     pub outline_hwnd: Cell<HWND>,
+    inline_anchor: Cell<Option<(i32, i32)>>,
     pub selection_gate: Mutex<Option<(cheime_model::SessionEpoch, cheime_model::Revision)>>,
     pub rollback_guard: Mutex<RollbackGuard>,
     pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
@@ -310,6 +311,7 @@ impl CandidateWindow {
             if !self.ctx_ptr.is_null() {
                 let _ = ShowWindow((*self.ctx_ptr).shadow_hwnd.get(), SW_HIDE);
                 let _ = ShowWindow((*self.ctx_ptr).outline_hwnd.get(), SW_HIDE);
+                (*self.ctx_ptr).inline_anchor.set(None);
             }
         }
     }
@@ -349,6 +351,7 @@ impl CandidateWindow {
             composition_sink,
             shadow_hwnd: Cell::new(HWND(std::ptr::null_mut())),
             outline_hwnd: Cell::new(HWND(std::ptr::null_mut())),
+            inline_anchor: Cell::new(None),
             selection_gate: Mutex::new(None),
             rollback_guard: Mutex::new(RollbackGuard::default()),
             rollback_anchor: Mutex::new(None),
@@ -520,12 +523,15 @@ unsafe extern "system" fn candidate_window_proc(
                 if !status.0 {
                     if let Some(ctx) = ctx() {
                         ctx.disarm_rollback(GuardEvent::FocusChanged);
+                        ctx.inline_anchor.set(None);
                         unsafe {
                             let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
                             let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
                         }
                     }
-                    unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
                 }
             }
             LRESULT(0)
@@ -584,15 +590,89 @@ fn draw_window_surface(
 
 // ── Message handlers ──────────────────────────────────────────────────
 
+/// Keep an inline candidate window at the first glyph of the active
+/// composition. A few TSF hosts temporarily reject synchronous text-extent
+/// requests while updating their document, so a missing extent must not make
+/// the window follow the moving caret.
+fn get_inline_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
+    let text_extent = try_get_text_ext(ctx, true);
+    let cached = ctx.inline_anchor.get();
+    let initial_caret = if text_extent.is_none() && cached.is_none() {
+        try_get_gui_caret_screen_rect()
+    } else {
+        None
+    };
+    let (anchor, updated_cache) = resolve_inline_anchor(text_extent, cached, initial_caret);
+    ctx.inline_anchor.set(updated_cache);
+
+    if let Some(pos) = anchor {
+        let source = if text_extent.is_some() {
+            "composition"
+        } else if cached.is_some() {
+            "cached-composition"
+        } else {
+            "initial-caret"
+        };
+        tsf_log(&format!(
+            "[CheIME] inline anchor source={source}: ({}, {})",
+            pos.0, pos.1
+        ));
+    }
+    anchor
+}
+
+fn resolve_inline_anchor(
+    text_extent: Option<(i32, i32)>,
+    cached: Option<(i32, i32)>,
+    initial_caret: Option<(i32, i32)>,
+) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
+    let anchor = text_extent.or(cached).or(initial_caret);
+    (anchor, anchor)
+}
+
+fn try_get_gui_caret_screen_rect() -> Option<(i32, i32)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetGUIThreadInfo};
+
+    let mut gui_info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(0, &mut gui_info) }.is_err() {
+        return None;
+    }
+    let rc = gui_info.rcCaret;
+    if rc.left == 0 && rc.right == 0 {
+        return None;
+    }
+    let hwnd = gui_info.hwndCaret;
+    if hwnd.is_invalid() {
+        return None;
+    }
+    let mut screen_point = POINT {
+        x: rc.left,
+        y: rc.bottom,
+    };
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut screen_point);
+    }
+    tsf_log(&format!(
+        "[CheIME] GetGUIThreadInfo: caret=({}, {}) screen=({}, {})",
+        rc.left, rc.bottom, screen_point.x, screen_point.y
+    ));
+    Some((screen_point.x, screen_point.y))
+}
+
 /// Get the screen (left, bottom) of the composition text via a synchronous
 /// Get the screen position for the candidate window.
 /// Tries: (1) TSF GetTextExt, (2) GetGUIThreadInfo caret rect.
-fn get_composition_screen_rect(
-    ctx: &WindowContext,
-    inline_preedit: bool,
-) -> Option<(i32, i32)> {
+fn get_composition_screen_rect(ctx: &WindowContext, inline_preedit: bool) -> Option<(i32, i32)> {
+    if inline_preedit {
+        return get_inline_composition_screen_rect(ctx);
+    }
+
+    ctx.inline_anchor.set(None);
     // Try 1: TSF GetTextExt via edit session
-    if let Some(pos) = try_get_text_ext(ctx, inline_preedit) {
+    if let Some(pos) = try_get_text_ext(ctx, false) {
         tsf_log(&format!("[CheIME] GetTextExt OK: ({}, {})", pos.0, pos.1));
         return Some(pos);
     }
@@ -668,10 +748,12 @@ fn try_get_text_ext(ctx: &WindowContext, inline_preedit: bool) -> Option<(i32, i
         None
     };
 
-    // If inline composition has not been created yet, or non-inline mode is
-    // active, use the current selection range.
+    // Inline positioning must use the real composition range. Falling back to
+    // the selection here would report the moving caret on every snapshot and
+    // defeat the stable composition-start cache above.
     let range = match composition_range {
         Some(r) => r,
+        None if inline_preedit => return None,
         None => {
             use windows::Win32::UI::TextServices::{TF_DEFAULT_SELECTION, TF_SELECTION};
             let mut sel = [TF_SELECTION::default()];
@@ -802,6 +884,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
 
         // Hide window when there's no composition (e.g. after Backspace clears all)
         if boxed.preedit.is_empty() {
+            ctx.inline_anchor.set(None);
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
@@ -908,6 +991,7 @@ fn clamp_window_right(x: i32, width: i32, work_area: RECT, edge_margin: i32) -> 
         .max(left_limit.min(right_limit.saturating_sub(1)))
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn update_shadow_window(
     hwnd: HWND,
     body_x: i32,
@@ -930,7 +1014,7 @@ unsafe fn update_shadow_window(
     let extent = blur.saturating_mul(2).max(1);
     let width = body_width.saturating_add(extent.saturating_mul(2)).max(1);
     let height = body_height.saturating_add(extent.saturating_mul(2)).max(1);
-    let mut info = BITMAPINFO {
+    let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
@@ -950,16 +1034,15 @@ unsafe fn update_shadow_window(
         return;
     }
     let mut bits: *mut c_void = std::ptr::null_mut();
-    let bitmap =
-        match unsafe { CreateDIBSection(dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) } {
-            Ok(bitmap) => bitmap,
-            Err(_) => {
-                unsafe {
-                    let _ = DeleteDC(dc);
-                }
-                return;
+    let bitmap = match unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) } {
+        Ok(bitmap) => bitmap,
+        Err(_) => {
+            unsafe {
+                let _ = DeleteDC(dc);
             }
-        };
+            return;
+        }
+    };
     let old = unsafe { SelectObject(dc, bitmap) };
     let scheme = config.active_scheme(dark_mode);
     let color = parse_hex(&scheme.shadow_color).unwrap_or(COLORREF(0));
@@ -1055,7 +1138,7 @@ unsafe fn update_outline_window(
     }
     let width = body_width.saturating_add(WINDOW_OUTLINE * 2).max(1);
     let height = body_height.saturating_add(WINDOW_OUTLINE * 2).max(1);
-    let mut info = BITMAPINFO {
+    let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
@@ -1075,16 +1158,15 @@ unsafe fn update_outline_window(
         return;
     }
     let mut bits: *mut c_void = std::ptr::null_mut();
-    let bitmap =
-        match unsafe { CreateDIBSection(dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) } {
-            Ok(bitmap) => bitmap,
-            Err(_) => {
-                unsafe {
-                    let _ = DeleteDC(dc);
-                }
-                return;
+    let bitmap = match unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) } {
+        Ok(bitmap) => bitmap,
+        Err(_) => {
+            unsafe {
+                let _ = DeleteDC(dc);
             }
-        };
+            return;
+        }
+    };
     let old = unsafe { SelectObject(dc, bitmap) };
     let color = parse_hex(&config.active_scheme(dark_mode).border_color).unwrap_or(COLORREF(0));
     let pixels =
@@ -1920,15 +2002,7 @@ unsafe fn rounded_surface_path(bounds: RECT, radius: f32, inset: f32) -> *mut Gp
     } else {
         unsafe {
             let _ = GdipAddPathArc(path, left, top, diameter, diameter, 180.0, 90.0);
-            let _ = GdipAddPathArc(
-                path,
-                right - diameter,
-                top,
-                diameter,
-                diameter,
-                270.0,
-                90.0,
-            );
+            let _ = GdipAddPathArc(path, right - diameter, top, diameter, diameter, 270.0, 90.0);
             let _ = GdipAddPathArc(
                 path,
                 right - diameter,
@@ -2280,10 +2354,34 @@ mod tests {
             highlighted: None,
             status: SessionStatus::Composing,
         };
-        let mut cfg = StyleConfig::default();
-        cfg.inline_preedit = true;
+        let cfg = StyleConfig {
+            inline_preedit: true,
+            ..Default::default()
+        };
         let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
         assert!(rows.iter().all(|row| row.candidate_index.is_some()));
+    }
+
+    #[test]
+    fn inline_anchor_prefers_composition_start_and_refreshes_cache() {
+        let (anchor, cache) =
+            resolve_inline_anchor(Some((120, 240)), Some((80, 240)), Some((180, 240)));
+        assert_eq!(anchor, Some((120, 240)));
+        assert_eq!(cache, Some((120, 240)));
+    }
+
+    #[test]
+    fn inline_anchor_stays_at_cached_start_when_text_extent_is_temporarily_missing() {
+        let (anchor, cache) = resolve_inline_anchor(None, Some((120, 240)), Some((260, 240)));
+        assert_eq!(anchor, Some((120, 240)));
+        assert_eq!(cache, Some((120, 240)));
+    }
+
+    #[test]
+    fn inline_anchor_uses_caret_only_to_initialize_a_new_composition() {
+        let (anchor, cache) = resolve_inline_anchor(None, None, Some((180, 240)));
+        assert_eq!(anchor, Some((180, 240)));
+        assert_eq!(cache, Some((180, 240)));
     }
 
     #[test]
@@ -2309,9 +2407,11 @@ mod tests {
             highlighted: Some(CandidateId::new(1)),
             status: SessionStatus::Composing,
         };
-        let mut cfg = StyleConfig::default();
-        cfg.inline_preedit = true;
-        cfg.show_candidate_annotations = false;
+        let cfg = StyleConfig {
+            inline_preedit: true,
+            show_candidate_annotations: false,
+            ..Default::default()
+        };
         let (rows, _, _) = build_rows(&snap, 22, 18, &cfg);
         let candidate = rows
             .iter()

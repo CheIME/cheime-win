@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! CheIME Engine Host.
 //!
 //! The user-level x64 process that hosts all CheIME engine logic.

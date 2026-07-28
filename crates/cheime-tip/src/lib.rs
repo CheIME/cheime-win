@@ -10,6 +10,7 @@ pub mod tsf_interfaces;
 
 pub mod candidate_window;
 pub mod display_attribute;
+#[allow(clippy::items_after_test_module)]
 pub mod edit_session;
 mod io_thread;
 pub mod key_handler;

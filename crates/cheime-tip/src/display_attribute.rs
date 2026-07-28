@@ -22,6 +22,7 @@ impl ITfDisplayAttributeInfo_Impl for PreeditDisplayAttribute_Impl {
         Ok(BSTR::from("CheIME inline preedit"))
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn GetAttributeInfo(&self, output: *mut TF_DISPLAYATTRIBUTE) -> Result<()> {
         if output.is_null() {
             return Err(windows::core::Error::from_hresult(
