@@ -7,13 +7,17 @@ use crate::edit_session::request_edit_session;
 use crate::io_thread::{PostedAction, WM_CHEIME_ACTION, WM_CHEIME_SNAPSHOT, WM_CHEIME_STATUS};
 use crate::rollback_guard::{GuardEvent, RollbackGuard};
 use crate::tsf_interfaces::{ComTip, tsf_log};
-use cheime_model::CandidateSnapshot;
+use cheime_model::{CandidateSnapshot, PlatformActionKind};
 use cheime_protocol::FrontendMessage;
 use cheime_tip_core::ui_config::{
-    AntialiasMode, LayoutType, PreeditType, StyleConfig, TextVerticalAlign, UiConfig,
+    AntialiasMode, LayoutConfig, LayoutType, MarkPosition, PreeditType, StyleConfig,
+    TextHorizontalAlign, TextVerticalAlign, UiConfig,
 };
 use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
@@ -29,11 +33,11 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, BeginPaint, BitBlt, CLEARTYPE_QUALITY, COLOR_WINDOW, COLOR_WINDOWTEXT,
     ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect,
-    GetMonitorInfoW, GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, NONANTIALIASED_QUALITY,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
-    TEXTMETRICW, TRANSPARENT, TextOutW,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FillRect, GetMonitorInfoW,
+    GetSysColor, GetTextMetricsW, HBRUSH, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromPoint, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TEXTMETRICW, TRANSPARENT,
+    TextOutW, UpdateWindow,
 };
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArc, GdipAddPathArcI, GdipClosePathFigure, GdipCreateFromHDC,
@@ -44,15 +48,17 @@ use windows::Win32::Graphics::GdiPlus::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfContextView, ITfEditSession, ITfEditSession_Vtbl, ITfRange, ITfThreadMgr,
-    TF_ANCHOR_END, TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_SYNC, TfAnchor,
+    ITfComposition, ITfCompositionSink, ITfContext, ITfContextView, ITfEditSession,
+    ITfEditSession_Vtbl, ITfRange, ITfThreadMgr, TF_ANCHOR_END, TF_ANCHOR_START,
+    TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_E_NOLAYOUT, TF_ES_ASYNC, TF_ES_READ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetWindowLongPtrW, HMENU, HWND_TOPMOST, IsWindowVisible, RegisterClassW, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
+    GetWindowLongPtrW, HMENU, HWND_TOPMOST, IsWindowVisible, KillTimer, PostMessageW,
+    RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
+    SWP_NOSIZE, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, ULW_OPAQUE,
     UpdateLayeredWindow, WINDOW_LONG_PTR_INDEX, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_LAYERED,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASS_STYLES, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
@@ -60,12 +66,30 @@ use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 const CANDIDATE_WINDOW_CLASS: &str = "CheIME_CandidateWindow";
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_CHEIME_RELOAD_CONFIG: u32 = 0x8000 + 0x124;
-const WINDOW_OUTLINE: i32 = 1;
+pub const WM_CHEIME_LAYOUT_CHANGE: u32 = 0x8000 + 0x125;
+const WM_CHEIME_TEXT_EXTENT: u32 = 0x8000 + 0x126;
+const POSITION_RETRY_TIMER_ID: usize = 0x4348_4549;
+const MAX_POSITION_RETRIES: u8 = 6;
 
 // ── COM constants (local copies to avoid coupling) ────────────────────
 const S_OK: HRESULT = HRESULT(0);
+const E_FAIL: HRESULT = HRESULT(0x8000_4005u32 as i32);
 const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
 const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextExtentKind {
+    CompositionStart,
+    Selection,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TextExtentUpdate {
+    generation: u64,
+    kind: TextExtentKind,
+    outcome: TextExtentOutcome,
+    screen_extent: Option<RECT>,
+}
 
 /// One-time guard for `RegisterClassW` (Fix 4: prevents GDI brush leak).
 static REGISTER_WNDCLASS: Once = Once::new();
@@ -78,6 +102,7 @@ pub struct RowRender {
     pub label: Vec<u16>,
     pub candidate: Vec<u16>,
     pub comment: Vec<u16>,
+    pub content_width: i32,
     pub x: i32,
     pub y: i32,
     pub bounds: RECT,
@@ -92,14 +117,23 @@ pub struct WindowContext {
     pub thread_mgr: ITfThreadMgr,
     pub client_id: u32,
     pub channel: SyncSender<FrontendMessage>,
-    pub composition: Mutex<Option<ITfComposition>>,
-    pub composition_sink: *mut c_void,
+    pub composition: Rc<Mutex<Option<ITfComposition>>>,
+    pub composition_sink: ITfCompositionSink,
     pub shadow_hwnd: Cell<HWND>,
     pub outline_hwnd: Cell<HWND>,
     inline_anchor: Cell<Option<(i32, i32)>>,
+    position_needs_retry: Cell<bool>,
+    position_retry_count: Cell<u8>,
+    position_retry_pending: Cell<bool>,
+    position_dirty: Cell<bool>,
+    position_request_pending: Cell<bool>,
+    position_generation: Cell<u64>,
+    position_result: Cell<Option<(TextExtentKind, (i32, i32))>>,
+    pub lifetime_alive: Rc<Cell<bool>>,
+    visual_state: Cell<Option<WindowVisualState>>,
     pub selection_gate: Mutex<Option<(cheime_model::SessionEpoch, cheime_model::Revision)>>,
-    pub rollback_guard: Mutex<RollbackGuard>,
-    pub rollback_anchor: Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+    pub rollback_guard: Rc<Mutex<RollbackGuard>>,
+    pub rollback_anchor: Rc<Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>>,
     pub tip: *mut ComTip,
     pub render: Mutex<RenderState>,
     shadow_pixels: Mutex<Option<ShadowPixels>>,
@@ -107,6 +141,7 @@ pub struct WindowContext {
 
 impl Drop for WindowContext {
     fn drop(&mut self) {
+        self.lifetime_alive.set(false);
         let shadow = self.shadow_hwnd.get();
         if !shadow.is_invalid() {
             unsafe {
@@ -156,13 +191,28 @@ struct ShadowPixels {
     pixels: Vec<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowVisualState {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    corner_radius: i32,
+    decoration_signature: u64,
+}
+
 pub struct CandidateWindow {
     hwnd: HWND,
     pub ctx_ptr: *const WindowContext,
 }
 
-/// Create a GDI font for the given pixel size (Microsoft YaHei, normal weight).
-fn create_gdi_font(font_size: i32, font_face: &str, antialias: AntialiasMode) -> HFONT {
+/// Create a GDI font for the configured size, face and CSS-like weight.
+fn create_gdi_font(
+    font_size: i32,
+    font_face: &str,
+    font_weight: i32,
+    antialias: AntialiasMode,
+) -> HFONT {
     let face: Vec<u16> = font_face.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         CreateFontW(
@@ -170,7 +220,7 @@ fn create_gdi_font(font_size: i32, font_face: &str, antialias: AntialiasMode) ->
             0,
             0,
             0,
-            FW_NORMAL.0 as i32,
+            font_weight.clamp(100, 900),
             0,
             0,
             0,
@@ -224,7 +274,7 @@ impl CandidateWindow {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 windows::core::PCWSTR::from_raw(class_wide.as_ptr()),
                 windows::core::w!("CheIME Candidate"),
                 WS_POPUP,
@@ -311,7 +361,9 @@ impl CandidateWindow {
             if !self.ctx_ptr.is_null() {
                 let _ = ShowWindow((*self.ctx_ptr).shadow_hwnd.get(), SW_HIDE);
                 let _ = ShowWindow((*self.ctx_ptr).outline_hwnd.get(), SW_HIDE);
-                (*self.ctx_ptr).inline_anchor.set(None);
+                (*self.ctx_ptr).visual_state.set(None);
+                invalidate_position(&*self.ctx_ptr);
+                clear_position_retry(self.hwnd, &*self.ctx_ptr);
             }
         }
     }
@@ -324,22 +376,25 @@ impl CandidateWindow {
         client_id: u32,
         channel: SyncSender<FrontendMessage>,
         tip: *mut ComTip,
-        composition_sink: *mut c_void,
+        composition_sink: ITfCompositionSink,
     ) -> Box<WindowContext> {
         let config = crate::ui_settings::load_config();
         let font = create_gdi_font(
             config.style.font_point,
             &config.style.font_face,
+            config.style.font_weight,
             config.style.antialias_mode,
         );
         let label_font = create_gdi_font(
             config.style.label_font_point,
             &config.style.label_font_face,
+            config.style.label_font_weight,
             config.style.antialias_mode,
         );
         let comment_font = create_gdi_font(
             config.style.comment_font_point,
             &config.style.comment_font_face,
+            config.style.comment_font_weight,
             config.style.antialias_mode,
         );
         Box::new(WindowContext {
@@ -347,14 +402,23 @@ impl CandidateWindow {
             thread_mgr,
             client_id,
             channel,
-            composition: Mutex::new(None),
+            composition: Rc::new(Mutex::new(None)),
             composition_sink,
             shadow_hwnd: Cell::new(HWND(std::ptr::null_mut())),
             outline_hwnd: Cell::new(HWND(std::ptr::null_mut())),
             inline_anchor: Cell::new(None),
+            position_needs_retry: Cell::new(false),
+            position_retry_count: Cell::new(0),
+            position_retry_pending: Cell::new(false),
+            position_dirty: Cell::new(true),
+            position_request_pending: Cell::new(false),
+            position_generation: Cell::new(1),
+            position_result: Cell::new(None),
+            lifetime_alive: Rc::new(Cell::new(true)),
+            visual_state: Cell::new(None),
             selection_gate: Mutex::new(None),
-            rollback_guard: Mutex::new(RollbackGuard::default()),
-            rollback_anchor: Mutex::new(None),
+            rollback_guard: Rc::new(Mutex::new(RollbackGuard::default())),
+            rollback_anchor: Rc::new(Mutex::new(None)),
             tip,
             render: Mutex::new(RenderState {
                 config,
@@ -494,7 +558,33 @@ unsafe extern "system" fn candidate_window_proc(
             LRESULT(0)
         }
 
-        WM_CHEIME_SNAPSHOT => handle_snapshot(hwnd, lparam, ctx()),
+        WM_CHEIME_SNAPSHOT => {
+            if let Some(ctx) = ctx() {
+                ctx.position_dirty.set(true);
+            }
+            handle_snapshot(hwnd, lparam, ctx())
+        }
+
+        WM_CHEIME_LAYOUT_CHANGE => {
+            if let Some(ctx) = ctx() {
+                ctx.position_dirty.set(true);
+                rerender_current_snapshot(hwnd, ctx)
+            } else {
+                LRESULT(0)
+            }
+        }
+
+        WM_CHEIME_TEXT_EXTENT => handle_text_extent_update(hwnd, lparam, ctx()),
+
+        WM_TIMER if wparam.0 == POSITION_RETRY_TIMER_ID => {
+            let _ = unsafe { KillTimer(hwnd, POSITION_RETRY_TIMER_ID) };
+            if let Some(ctx) = ctx() {
+                ctx.position_retry_pending.set(false);
+                ctx.position_dirty.set(true);
+                return rerender_current_snapshot(hwnd, ctx);
+            }
+            LRESULT(0)
+        }
 
         WM_CHEIME_RELOAD_CONFIG => {
             if let Some(ctx) = ctx() {
@@ -511,7 +601,7 @@ unsafe extern "system" fn candidate_window_proc(
             LRESULT(0)
         }
 
-        WM_CHEIME_ACTION => handle_action(lparam, ctx()),
+        WM_CHEIME_ACTION => handle_action(hwnd, lparam, ctx()),
 
         WM_CHEIME_STATUS => {
             if lparam.0 != 0 {
@@ -523,7 +613,9 @@ unsafe extern "system" fn candidate_window_proc(
                 if !status.0 {
                     if let Some(ctx) = ctx() {
                         ctx.disarm_rollback(GuardEvent::FocusChanged);
-                        ctx.inline_anchor.set(None);
+                        ctx.visual_state.set(None);
+                        invalidate_position(ctx);
+                        clear_position_retry(hwnd, ctx);
                         unsafe {
                             let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
                             let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
@@ -594,8 +686,14 @@ fn draw_window_surface(
 /// composition. A few TSF hosts temporarily reject synchronous text-extent
 /// requests while updating their document, so a missing extent must not make
 /// the window follow the moving caret.
-fn get_inline_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)> {
-    let text_extent = try_get_text_ext(ctx, true);
+fn get_inline_composition_screen_rect(hwnd: HWND, ctx: &WindowContext) -> Option<(i32, i32)> {
+    request_position_extent(hwnd, ctx, TextExtentKind::CompositionStart);
+    let text_extent = ctx
+        .position_result
+        .get()
+        .filter(|(kind, _)| *kind == TextExtentKind::CompositionStart)
+        .map(|(_, point)| point);
+    ctx.position_needs_retry.set(text_extent.is_none());
     let cached = ctx.inline_anchor.get();
     let initial_caret = if text_extent.is_none() && cached.is_none() {
         try_get_gui_caret_screen_rect()
@@ -621,13 +719,61 @@ fn get_inline_composition_screen_rect(ctx: &WindowContext) -> Option<(i32, i32)>
     anchor
 }
 
+type ScreenPoint = (i32, i32);
+type AnchorResolution = (Option<ScreenPoint>, Option<ScreenPoint>);
+
 fn resolve_inline_anchor(
-    text_extent: Option<(i32, i32)>,
-    cached: Option<(i32, i32)>,
-    initial_caret: Option<(i32, i32)>,
-) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
-    let anchor = text_extent.or(cached).or(initial_caret);
+    text_extent: Option<ScreenPoint>,
+    cached: Option<ScreenPoint>,
+    initial_caret: Option<ScreenPoint>,
+) -> AnchorResolution {
+    // Keep only the horizontal origin pinned. The live text extent owns the
+    // vertical coordinate because it is the actual bottom of the underlined
+    // preedit glyph. Reusing the initial caret's Y coordinate can place the
+    // candidate window above the preedit in hosts whose caret rectangle and
+    // glyph rectangle have different vertical origins.
+    let x = cached
+        .map(|point| point.0)
+        .or_else(|| text_extent.map(|point| point.0))
+        .or_else(|| initial_caret.map(|point| point.0));
+    let y = text_extent
+        .map(|point| point.1)
+        .or_else(|| cached.map(|point| point.1))
+        .or_else(|| initial_caret.map(|point| point.1));
+    let anchor = x.zip(y);
     (anchor, anchor)
+}
+
+fn schedule_position_retry(hwnd: HWND, ctx: &WindowContext) {
+    if ctx.position_retry_pending.get() {
+        return;
+    }
+    let attempt = ctx.position_retry_count.get();
+    let Some(delay_ms) = position_retry_delay(attempt) else {
+        return;
+    };
+    let timer = unsafe { SetTimer(hwnd, POSITION_RETRY_TIMER_ID, delay_ms, None) };
+    if timer != 0 {
+        ctx.position_retry_count.set(attempt.saturating_add(1));
+        ctx.position_retry_pending.set(true);
+        tsf_log(&format!(
+            "[CheIME] text layout retry {} scheduled in {} ms",
+            attempt + 1,
+            delay_ms
+        ));
+    }
+}
+
+fn position_retry_delay(attempt: u8) -> Option<u32> {
+    (attempt < MAX_POSITION_RETRIES).then(|| 16u32.saturating_mul(1u32 << attempt.min(5)))
+}
+
+fn clear_position_retry(hwnd: HWND, ctx: &WindowContext) {
+    if ctx.position_retry_pending.replace(false) {
+        let _ = unsafe { KillTimer(hwnd, POSITION_RETRY_TIMER_ID) };
+    }
+    ctx.position_retry_count.set(0);
+    ctx.position_needs_retry.set(false);
 }
 
 fn try_get_gui_caret_screen_rect() -> Option<(i32, i32)> {
@@ -665,17 +811,28 @@ fn try_get_gui_caret_screen_rect() -> Option<(i32, i32)> {
 /// Get the screen (left, bottom) of the composition text via a synchronous
 /// Get the screen position for the candidate window.
 /// Tries: (1) TSF GetTextExt, (2) GetGUIThreadInfo caret rect.
-fn get_composition_screen_rect(ctx: &WindowContext, inline_preedit: bool) -> Option<(i32, i32)> {
+fn get_composition_screen_rect(
+    hwnd: HWND,
+    ctx: &WindowContext,
+    inline_preedit: bool,
+) -> Option<(i32, i32)> {
     if inline_preedit {
-        return get_inline_composition_screen_rect(ctx);
+        return get_inline_composition_screen_rect(hwnd, ctx);
     }
 
     ctx.inline_anchor.set(None);
-    // Try 1: TSF GetTextExt via edit session
-    if let Some(pos) = try_get_text_ext(ctx, false) {
+    request_position_extent(hwnd, ctx, TextExtentKind::Selection);
+    if let Some(pos) = ctx
+        .position_result
+        .get()
+        .filter(|(kind, _)| *kind == TextExtentKind::Selection)
+        .map(|(_, point)| point)
+    {
+        ctx.position_needs_retry.set(false);
         tsf_log(&format!("[CheIME] GetTextExt OK: ({}, {})", pos.0, pos.1));
         return Some(pos);
     }
+    ctx.position_needs_retry.set(true);
 
     // Try 2: GetGUIThreadInfo — returns the caret rect in screen coordinates
     // This works with TSF applications that may not have a system caret.
@@ -734,66 +891,178 @@ fn get_composition_screen_rect(ctx: &WindowContext, inline_preedit: bool) -> Opt
 /// Try GetTextExt via TSF edit session.
 /// Inline preedit anchors to the start of the active composition. Non-inline
 /// mode anchors to the current selection/caret as usual.
-fn try_get_text_ext(ctx: &WindowContext, inline_preedit: bool) -> Option<(i32, i32)> {
-    let doc = unsafe { ctx.thread_mgr.GetFocus() }.ok()?;
-    let context = unsafe { doc.GetTop() }.ok()?;
-    let view = unsafe { context.GetActiveView() }.ok()?;
+fn request_position_extent(hwnd: HWND, ctx: &WindowContext, kind: TextExtentKind) {
+    if !ctx.position_dirty.get() || ctx.position_request_pending.get() {
+        return;
+    }
+    ctx.position_dirty.set(false);
 
-    let composition_range = if inline_preedit {
-        let comp_guard = ctx.composition.lock().ok()?;
-        comp_guard
-            .as_ref()
-            .and_then(|comp| unsafe { comp.GetRange() }.ok())
-    } else {
-        None
-    };
-
-    // Inline positioning must use the real composition range. Falling back to
-    // the selection here would report the moving caret on every snapshot and
-    // defeat the stable composition-start cache above.
-    let range = match composition_range {
-        Some(r) => r,
-        None if inline_preedit => return None,
-        None => {
-            use windows::Win32::UI::TextServices::{TF_DEFAULT_SELECTION, TF_SELECTION};
-            let mut sel = [TF_SELECTION::default()];
-            let mut fetched = 0u32;
-            if unsafe {
-                context.GetSelection(0xFFFFFFFFu32, TF_DEFAULT_SELECTION, &mut sel, &mut fetched)
+    let request = (|| {
+        let doc = unsafe { ctx.thread_mgr.GetFocus() }.ok()?;
+        let context = unsafe { doc.GetTop() }.ok()?;
+        let view = unsafe { context.GetActiveView() }.ok()?;
+        let screen_extent = unsafe { view.GetScreenExt() }.ok();
+        let generation = ctx.position_generation.get();
+        let session = match kind {
+            TextExtentKind::CompositionStart => {
+                let range = {
+                    let composition = ctx.composition.lock().ok()?;
+                    composition
+                        .as_ref()
+                        .and_then(|composition| unsafe { composition.GetRange() }.ok())?
+                };
+                TextExtentSession::new_range(
+                    hwnd,
+                    generation,
+                    kind,
+                    screen_extent,
+                    ctx.lifetime_alive.clone(),
+                    view,
+                    range,
+                )
             }
-            .is_err()
-                || fetched == 0
-            {
-                return None;
-            }
-            unsafe { sel[0].range.as_ref()?.Clone() }.ok()?
-        }
+            TextExtentKind::Selection => TextExtentSession::new_selection(
+                hwnd,
+                generation,
+                kind,
+                screen_extent,
+                ctx.lifetime_alive.clone(),
+                view,
+                context.clone(),
+            ),
+        };
+        Some((context, session))
+    })();
+    let Some((context, session)) = request else {
+        ctx.position_dirty.set(true);
+        ctx.position_needs_retry.set(true);
+        return;
     };
 
-    let result = Cell::new(None::<RECT>);
-    let anchor = if inline_preedit {
-        TF_ANCHOR_START
-    } else {
-        TF_ANCHOR_END
-    };
-    let session = TextExtentSession::new(
-        view,
-        range,
-        anchor,
-        inline_preedit,
-        &result as *const Cell<Option<RECT>>,
-    );
+    ctx.position_request_pending.set(true);
     let raw = Box::into_raw(session);
     let raw_void: *mut c_void = raw.cast();
-
-    if let Some(session_ref) = unsafe { ITfEditSession::from_raw_borrowed(&raw_void) } {
-        let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0);
-        let _ = unsafe { context.RequestEditSession(ctx.client_id, session_ref, flags) };
-    }
-
+    let result = unsafe { ITfEditSession::from_raw_borrowed(&raw_void) }.map(|session_ref| {
+        let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_ASYNC.0 | TF_ES_READ.0);
+        unsafe { context.RequestEditSession(ctx.client_id, session_ref, flags) }
+    });
     unsafe { TextExtentSession::release(raw_void) };
 
-    result.take().map(|r| (r.left, r.bottom))
+    let rejected = match result {
+        None => true,
+        Some(Err(error)) => {
+            tsf_log(&format!("[CheIME] text extent request failed: {error}"));
+            true
+        }
+        Some(Ok(session_hr)) if session_hr.is_err() => {
+            tsf_log(&format!(
+                "[CheIME] text extent edit session rejected: {session_hr:?}"
+            ));
+            true
+        }
+        Some(Ok(_)) => false,
+    };
+    if rejected {
+        ctx.position_request_pending.set(false);
+        ctx.position_dirty.set(true);
+        ctx.position_needs_retry.set(true);
+    }
+}
+
+fn rerender_current_snapshot(hwnd: HWND, ctx: &WindowContext) -> LRESULT {
+    let snapshot = ctx
+        .snapshot
+        .lock()
+        .ok()
+        .and_then(|state| state.as_ref().map(|(snapshot, _)| snapshot.clone()));
+    let Some(snapshot) = snapshot else {
+        return LRESULT(0);
+    };
+    let raw = Box::into_raw(Box::new(snapshot));
+    handle_snapshot(hwnd, LPARAM(raw as isize), Some(ctx))
+}
+
+fn handle_text_extent_update(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
+    if lparam.0 == 0 {
+        return LRESULT(0);
+    }
+    let update = unsafe { Box::from_raw(lparam.0 as *mut TextExtentUpdate) };
+    let Some(ctx) = ctx else {
+        return LRESULT(0);
+    };
+    if update.generation != ctx.position_generation.get() {
+        return LRESULT(0);
+    }
+    ctx.position_request_pending.set(false);
+
+    match update.outcome {
+        TextExtentOutcome::Ready(raw_rect) => {
+            let inline = update.kind == TextExtentKind::CompositionStart;
+            if let Some(rect) = normalize_text_extent(raw_rect, update.screen_extent, inline) {
+                let point = match update.kind {
+                    TextExtentKind::CompositionStart => (rect.left, rect.bottom.saturating_add(6)),
+                    TextExtentKind::Selection => (rect.left, rect.bottom),
+                };
+                ctx.position_result.set(Some((update.kind, point)));
+                ctx.position_needs_retry.set(false);
+            } else {
+                ctx.position_needs_retry.set(true);
+            }
+        }
+        TextExtentOutcome::NoLayout => {
+            tsf_log("[CheIME] GetTextExt: layout is not ready");
+            ctx.position_needs_retry.set(true);
+        }
+        TextExtentOutcome::Failed(error) => {
+            tsf_log(&format!("[CheIME] GetTextExt failed: {error:?}"));
+            ctx.position_needs_retry.set(true);
+        }
+    }
+    rerender_current_snapshot(hwnd, ctx)
+}
+
+fn invalidate_position(ctx: &WindowContext) {
+    ctx.position_generation
+        .set(ctx.position_generation.get().wrapping_add(1).max(1));
+    ctx.position_request_pending.set(false);
+    ctx.position_dirty.set(true);
+    ctx.position_result.set(None);
+    ctx.inline_anchor.set(None);
+}
+
+fn normalize_text_extent(
+    rect: RECT,
+    screen_extent: Option<RECT>,
+    inline_preedit: bool,
+) -> Option<RECT> {
+    if rect.bottom <= rect.top || (inline_preedit && rect.right <= rect.left) {
+        return None;
+    }
+    let Some(screen) =
+        screen_extent.filter(|screen| screen.right > screen.left && screen.bottom > screen.top)
+    else {
+        return Some(rect);
+    };
+    const TOLERANCE: i32 = 64;
+    let intersects_screen = |candidate: RECT| {
+        candidate.right >= screen.left.saturating_sub(TOLERANCE)
+            && candidate.left <= screen.right.saturating_add(TOLERANCE)
+            && candidate.bottom >= screen.top.saturating_sub(TOLERANCE)
+            && candidate.top <= screen.bottom.saturating_add(TOLERANCE)
+    };
+    if intersects_screen(rect) {
+        return Some(rect);
+    }
+
+    // If a host returns client-relative coordinates despite GetTextExt's
+    // screen-coordinate contract, translate through the active view origin.
+    let translated = RECT {
+        left: rect.left.saturating_add(screen.left),
+        top: rect.top.saturating_add(screen.top),
+        right: rect.right.saturating_add(screen.left),
+        bottom: rect.bottom.saturating_add(screen.top),
+    };
+    intersects_screen(translated).then_some(translated)
 }
 
 fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
@@ -809,24 +1078,30 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
                 || render.config.style.font_face != fresh.style.font_face
                 || render.config.style.label_font_point != fresh.style.label_font_point
                 || render.config.style.label_font_face != fresh.style.label_font_face
+                || render.config.style.font_weight != fresh.style.font_weight
+                || render.config.style.label_font_weight != fresh.style.label_font_weight
                 || render.config.style.comment_font_point != fresh.style.comment_font_point
                 || render.config.style.comment_font_face != fresh.style.comment_font_face
+                || render.config.style.comment_font_weight != fresh.style.comment_font_weight
                 || render.config.style.antialias_mode != fresh.style.antialias_mode;
             if font_changed {
                 let replacements = [
                     create_gdi_font(
                         fresh.style.font_point,
                         &fresh.style.font_face,
+                        fresh.style.font_weight,
                         fresh.style.antialias_mode,
                     ),
                     create_gdi_font(
                         fresh.style.label_font_point,
                         &fresh.style.label_font_face,
+                        fresh.style.label_font_weight,
                         fresh.style.antialias_mode,
                     ),
                     create_gdi_font(
                         fresh.style.comment_font_point,
                         &fresh.style.comment_font_face,
+                        fresh.style.comment_font_weight,
                         fresh.style.antialias_mode,
                     ),
                 ];
@@ -863,7 +1138,11 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         let content_height = font_pixel_height(cfg.style.font_point)
             .max(font_pixel_height(cfg.style.label_font_point))
             .max(font_pixel_height(cfg.style.comment_font_point));
-        let line_height = (content_height + cfg.style.layout.hilite_padding_y.max(0) * 2).max(1);
+        let line_height = content_height
+            .max(cfg.style.layout.candidate_min_height.max(0))
+            .saturating_add(cfg.style.layout.effective_hilite_padding_top())
+            .saturating_add(cfg.style.layout.effective_hilite_padding_bottom())
+            .max(1);
         let (mut rows, content_width, content_height) =
             build_rows(&boxed, line_height, char_width, &cfg.style);
         // Candidate content is never clipped to max_width. In particular,
@@ -872,7 +1151,7 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         // visible without truncating its rows.
         let window_width = content_width.max(cfg.style.layout.min_width).max(1);
         if cfg.style.layout.r#type == LayoutType::Vertical {
-            stretch_vertical_candidate_rows(&mut rows, window_width, cfg.style.layout.margin_x);
+            stretch_vertical_candidate_rows(&mut rows, window_width, &cfg.style.layout);
         }
         let window_height = content_height.max(1);
         // Sync has_composition from engine preedit
@@ -884,7 +1163,9 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
 
         // Hide window when there's no composition (e.g. after Backspace clears all)
         if boxed.preedit.is_empty() {
-            ctx.inline_anchor.set(None);
+            ctx.visual_state.set(None);
+            invalidate_position(ctx);
+            clear_position_retry(hwnd, ctx);
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
@@ -898,70 +1179,125 @@ fn handle_snapshot(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> L
         }
 
         // Fix 1: Position window below composition text via GetTextExt.
-        let (anchor_x, anchor_y) = get_composition_screen_rect(ctx, cfg.style.inline_preedit)
-            .map(|(left, bottom)| {
-                (
-                    left + cfg.style.layout.caret_offset_x,
-                    bottom + cfg.style.layout.caret_offset_y,
-                )
-            })
-            .unwrap_or_else(|| {
-                tsf_log("[CheIME] GetTextExt failed, using config offsets");
-                (
-                    cfg.style.layout.caret_offset_x,
-                    cfg.style.layout.caret_offset_y,
-                )
-            });
+        let measured_anchor = get_composition_screen_rect(hwnd, ctx, cfg.style.inline_preedit);
+        if ctx.position_needs_retry.get() {
+            schedule_position_retry(hwnd, ctx);
+        } else {
+            clear_position_retry(hwnd, ctx);
+        }
+        let previous_anchor = ctx.visual_state.get().map(|state| {
+            (
+                state.x.saturating_sub(cfg.style.layout.caret_offset_x),
+                state.y.saturating_sub(cfg.style.layout.caret_offset_y),
+            )
+        });
+        let Some((left, bottom)) = measured_anchor.or(previous_anchor) else {
+            // Configuration offsets are relative values, never absolute
+            // screen coordinates. Showing at (0, 0) when a host temporarily
+            // cannot expose a TSF extent causes the top-left jump. Keep the
+            // window hidden until a real anchor arrives.
+            tsf_log("[CheIME] no valid text anchor; deferring candidate window");
+            ctx.visual_state.set(None);
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
+                let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
+            }
+            return LRESULT(0);
+        };
+        let anchor_x = left.saturating_add(cfg.style.layout.caret_offset_x);
+        let anchor_y = bottom.saturating_add(cfg.style.layout.caret_offset_y);
         let (x, y) = fit_candidate_to_work_area(
             anchor_x,
             anchor_y,
             window_width,
             cfg.style.layout.screen_edge_margin,
         );
+        let next_visual_state = WindowVisualState {
+            x,
+            y,
+            width: window_width,
+            height: window_height,
+            corner_radius: cfg.style.layout.corner_radius,
+            decoration_signature: decoration_signature(cfg, dark_mode),
+        };
+        let previous_visual_state = ctx.visual_state.replace(Some(next_visual_state));
+        let shape_changed = previous_visual_state.is_none_or(|previous| {
+            previous.width != window_width
+                || previous.height != window_height
+                || previous.corner_radius != cfg.style.layout.corner_radius
+        });
+        let decorations_changed = previous_visual_state != Some(next_visual_state);
 
         unsafe {
-            update_shadow_window(
-                ctx.shadow_hwnd.get(),
-                x,
-                y,
-                window_width,
-                window_height,
-                cfg,
-                dark_mode,
-                &ctx.shadow_pixels,
-            );
-            update_outline_window(
-                ctx.outline_hwnd.get(),
-                x,
-                y,
-                window_width,
-                window_height,
-                cfg,
-                dark_mode,
-            );
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                window_width,
-                window_height,
-                SWP_NOACTIVATE,
-            );
-            apply_corner_radius(
-                hwnd,
-                window_width,
-                window_height,
-                cfg.style.layout.corner_radius,
-            );
+            if decorations_changed {
+                update_shadow_window(
+                    ctx.shadow_hwnd.get(),
+                    x,
+                    y,
+                    window_width,
+                    window_height,
+                    cfg,
+                    dark_mode,
+                    &ctx.shadow_pixels,
+                );
+                update_outline_window(
+                    ctx.outline_hwnd.get(),
+                    x,
+                    y,
+                    window_width,
+                    window_height,
+                    cfg,
+                    dark_mode,
+                );
+            }
+            if shape_changed {
+                apply_corner_radius(
+                    hwnd,
+                    window_width,
+                    window_height,
+                    cfg.style.layout.corner_radius,
+                );
+            }
+            if update_candidate_layered_window(hwnd, x, y, window_width, window_height, ctx) {
+                // UpdateLayeredWindow submits the new pixels, size and position
+                // as one compositor update. Only restore the main window's
+                // topmost order here; never resize it a second time.
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOREDRAW,
+                );
+            } else {
+                // Conservative fallback for hosts where layered updates fail.
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    window_width,
+                    window_height,
+                    SWP_NOACTIVATE | SWP_NOREDRAW,
+                );
+                let _ = InvalidateRect(hwnd, None, false);
+                let _ = UpdateWindow(hwnd);
+            }
             if !IsWindowVisible(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            let _ = InvalidateRect(hwnd, None, false);
         }
     } else {
+        ctx.visual_state.set(None);
+        invalidate_position(ctx);
+        clear_position_retry(hwnd, ctx);
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
+            let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
         }
     }
     LRESULT(0)
@@ -989,6 +1325,116 @@ fn clamp_window_right(x: i32, width: i32, work_area: RECT, edge_margin: i32) -> 
     let left_limit = work_area.left.saturating_add(margin);
     x.min(right_limit.saturating_sub(width.max(1)))
         .max(left_limit.min(right_limit.saturating_sub(1)))
+}
+
+fn decoration_signature(config: &UiConfig, dark_mode: bool) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let scheme = config.active_scheme(dark_mode);
+    dark_mode.hash(&mut hasher);
+    scheme.border_color.hash(&mut hasher);
+    scheme.shadow_color.hash(&mut hasher);
+    config.style.layout.corner_radius.hash(&mut hasher);
+    config.style.layout.border_width.hash(&mut hasher);
+    config.style.layout.shadow_enabled.hash(&mut hasher);
+    config.style.layout.shadow_radius.hash(&mut hasher);
+    config.style.layout.shadow_opacity.hash(&mut hasher);
+    config.style.layout.shadow_offset_x.hash(&mut hasher);
+    config.style.layout.shadow_offset_y.hash(&mut hasher);
+    hasher.finish()
+}
+
+unsafe fn update_candidate_layered_window(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    ctx: &WindowContext,
+) -> bool {
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (width as u32)
+                .saturating_mul(height as u32)
+                .saturating_mul(4),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.is_invalid() {
+        return false;
+    }
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let bitmap = match unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) } {
+        Ok(bitmap) => bitmap,
+        Err(_) => {
+            unsafe {
+                let _ = DeleteDC(dc);
+            }
+            return false;
+        }
+    };
+    let old = unsafe { SelectObject(dc, bitmap) };
+    let rendered = if let Ok(render) = ctx.render.lock() {
+        let bounds = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let scheme = render.config.active_scheme(render.dark_mode);
+        let background =
+            parse_hex(&scheme.back_color).unwrap_or(COLORREF(unsafe { GetSysColor(COLOR_WINDOW) }));
+        draw_window_surface(dc, bounds, &render.config, render.dark_mode, background);
+        if let Ok(snapshot) = ctx.snapshot.lock() {
+            if let Some((_, rows)) = snapshot.as_ref() {
+                unsafe {
+                    paint(
+                        dc,
+                        rows,
+                        &render.config,
+                        render.font,
+                        render.label_font,
+                        render.comment_font,
+                    );
+                }
+            }
+        }
+        let destination = POINT { x, y };
+        let size = SIZE {
+            cx: width,
+            cy: height,
+        };
+        let source = POINT::default();
+        unsafe {
+            UpdateLayeredWindow(
+                hwnd,
+                None,
+                Some(&destination),
+                Some(&size),
+                dc,
+                Some(&source),
+                COLORREF(0),
+                None,
+                ULW_OPAQUE,
+            )
+            .is_ok()
+        }
+    } else {
+        false
+    };
+    unsafe {
+        let _ = SelectObject(dc, old);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(dc);
+    }
+    rendered
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1109,15 +1555,6 @@ unsafe fn update_shadow_window(
         let _ = SelectObject(dc, old);
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(dc);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            destination.x,
-            destination.y,
-            width,
-            height,
-            SWP_NOACTIVATE,
-        );
         if !IsWindowVisible(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -1136,8 +1573,15 @@ unsafe fn update_outline_window(
     if hwnd.is_invalid() {
         return;
     }
-    let width = body_width.saturating_add(WINDOW_OUTLINE * 2).max(1);
-    let height = body_height.saturating_add(WINDOW_OUTLINE * 2).max(1);
+    let outline = config.style.layout.border_width.clamp(0, 32);
+    if outline == 0 {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        return;
+    }
+    let width = body_width.saturating_add(outline * 2).max(1);
+    let height = body_height.saturating_add(outline * 2).max(1);
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -1175,13 +1619,13 @@ unsafe fn update_outline_window(
         pixels,
         width,
         height,
-        config.style.layout.corner_radius.max(0) + WINDOW_OUTLINE,
+        config.style.layout.corner_radius.max(0) + outline,
         color.0,
     );
 
     let destination = POINT {
-        x: body_x - WINDOW_OUTLINE,
-        y: body_y - WINDOW_OUTLINE,
+        x: body_x - outline,
+        y: body_y - outline,
     };
     let size = SIZE {
         cx: width,
@@ -1211,15 +1655,6 @@ unsafe fn update_outline_window(
         let _ = SelectObject(dc, old);
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(dc);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            destination.x,
-            destination.y,
-            width,
-            height,
-            SWP_NOACTIVATE,
-        );
         if !IsWindowVisible(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -1289,40 +1724,46 @@ fn render_shadow_pixels(pixels: &mut [u32], key: ShadowKey, extent: i32) {
     }
 }
 
-fn stretch_vertical_candidate_rows(rows: &mut [RowRender], window_width: i32, margin_x: i32) {
-    let right = (window_width - margin_x.max(0)).max(1);
+fn stretch_vertical_candidate_rows(
+    rows: &mut [RowRender],
+    window_width: i32,
+    layout: &LayoutConfig,
+) {
+    let right = (window_width - layout.effective_margin_right()).max(1);
     for row in rows.iter_mut().filter(|row| row.candidate_index.is_some()) {
         row.bounds.right = right.max(row.bounds.left + 1);
+        align_row_text(row, layout);
     }
 }
 
-fn handle_action(lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
+fn handle_action(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRESULT {
     let Some(ctx) = ctx else { return LRESULT(0) };
     if lparam.0 != 0 {
         let posted: Box<PostedAction> = unsafe { Box::from_raw(lparam.0 as *mut PostedAction) };
         tsf_log(&format!("[CheIME] WM_ACTION action={:?}", posted.action));
+        if matches!(
+            &posted.action.kind,
+            PlatformActionKind::Commit { .. } | PlatformActionKind::CancelComposition
+        ) {
+            invalidate_position(ctx);
+            clear_position_retry(hwnd, ctx);
+        }
         match unsafe { ctx.thread_mgr.GetFocus() } {
             Ok(doc) => match unsafe { doc.GetTop() } {
                 Ok(context) => {
                     tsf_log("[CheIME] WM_ACTION: requesting edit session");
-                    if !ctx.tip.is_null() {
-                        unsafe { (*ctx.tip).suppress_text_edit_notifications(true) };
-                    }
                     request_edit_session(
                         ctx.client_id,
                         &context,
                         posted.action,
                         posted.token,
-                        &ctx.channel as *const SyncSender<FrontendMessage>,
-                        &ctx.composition as *const Mutex<Option<ITfComposition>>,
-                        ctx.composition_sink,
-                        &ctx.rollback_guard as *const Mutex<RollbackGuard>,
-                        &ctx.rollback_anchor
-                            as *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+                        ctx.channel.clone(),
+                        ctx.composition.clone(),
+                        ctx.composition_sink.clone(),
+                        ctx.rollback_guard.clone(),
+                        ctx.rollback_anchor.clone(),
+                        ctx.lifetime_alive.clone(),
                     );
-                    if !ctx.tip.is_null() {
-                        unsafe { (*ctx.tip).suppress_text_edit_notifications(false) };
-                    }
                 }
                 Err(e) => tsf_log(&format!("[CheIME] WM_ACTION: GetTop failed: {e:?}")),
             },
@@ -1397,6 +1838,9 @@ fn handle_click(hwnd: HWND, lparam: LPARAM, ctx: Option<&WindowContext>) -> LRES
             let _ = ShowWindow(ctx.shadow_hwnd.get(), SW_HIDE);
             let _ = ShowWindow(ctx.outline_hwnd.get(), SW_HIDE);
         }
+        ctx.visual_state.set(None);
+        invalidate_position(ctx);
+        clear_position_retry(hwnd, ctx);
     }
     LRESULT(0)
 }
@@ -1499,19 +1943,22 @@ unsafe fn paint(
         let candidate_y = aligned_text_y(
             row.bounds,
             candidate_height,
-            config.style.layout.hilite_padding_y,
+            config.style.layout.effective_hilite_padding_top(),
+            config.style.layout.effective_hilite_padding_bottom(),
             config.style.layout.text_vertical_align,
         );
         let label_y = aligned_text_y(
             row.bounds,
             label_height,
-            config.style.layout.hilite_padding_y,
+            config.style.layout.effective_hilite_padding_top(),
+            config.style.layout.effective_hilite_padding_bottom(),
             config.style.layout.text_vertical_align,
         );
         let comment_y = aligned_text_y(
             row.bounds,
             comment_height,
-            config.style.layout.hilite_padding_y,
+            config.style.layout.effective_hilite_padding_top(),
+            config.style.layout.effective_hilite_padding_bottom(),
             config.style.layout.text_vertical_align,
         );
         unsafe {
@@ -1545,14 +1992,14 @@ unsafe fn paint(
                 let _ = SelectObject(hdc, label_font);
                 let _ = TextOutW(hdc, x, label_y, &row.label);
                 x += text_utf16_width(&row.label, config.style.label_font_point)
-                    + config.style.layout.hilite_spacing.max(0);
+                    + config.style.layout.effective_label_spacing();
             }
             SetTextColor(hdc, if row.highlighted { selected_fg } else { fg });
             let _ = SelectObject(hdc, font);
             let _ = TextOutW(hdc, x, candidate_y, &row.candidate);
             x += text_utf16_width(&row.candidate, config.style.font_point);
             if !row.comment.is_empty() {
-                x += config.style.layout.hilite_spacing.max(0);
+                x += config.style.layout.effective_comment_spacing();
                 SetTextColor(
                     hdc,
                     if row.highlighted {
@@ -1590,15 +2037,18 @@ unsafe fn gdi_font_height(hdc: HDC, font: HFONT) -> i32 {
     height
 }
 
-fn aligned_text_y(bounds: RECT, text_height: i32, padding: i32, align: TextVerticalAlign) -> i32 {
-    let padding = padding.max(0);
-    let top = bounds.top + padding;
-    let bottom = (bounds.bottom - padding - text_height).max(top);
+fn aligned_text_y(
+    bounds: RECT,
+    text_height: i32,
+    padding_top: i32,
+    padding_bottom: i32,
+    align: TextVerticalAlign,
+) -> i32 {
+    let top = bounds.top + padding_top.max(0);
+    let bottom = (bounds.bottom - padding_bottom.max(0) - text_height).max(top);
     match align {
         TextVerticalAlign::Top => top,
-        TextVerticalAlign::Center => {
-            bounds.top + ((bounds.bottom - bounds.top - text_height).max(0) / 2)
-        }
+        TextVerticalAlign::Center => top + ((bottom - top).max(0) / 2),
         TextVerticalAlign::Bottom => bottom,
     }
 }
@@ -1610,9 +2060,14 @@ fn build_rows(
     config: &StyleConfig,
 ) -> (Vec<RowRender>, i32, i32) {
     let mut rows = Vec::new();
-    let pad_x = config.layout.margin_x.max(0);
-    let pad_y = config.layout.margin_y.max(0);
-    let mut y = pad_y;
+    let margin_left = config.layout.effective_margin_left();
+    let margin_right = config.layout.effective_margin_right();
+    let margin_top = config.layout.effective_margin_top();
+    let margin_bottom = config.layout.effective_margin_bottom();
+    let hilite_left = config.layout.effective_hilite_padding_left();
+    let hilite_right = config.layout.effective_hilite_padding_right();
+    let hilite_top = config.layout.effective_hilite_padding_top();
+    let mut y = margin_top;
 
     let preedit = if config.inline_preedit {
         String::new()
@@ -1646,12 +2101,13 @@ fn build_rows(
             label: Vec::new(),
             candidate: Vec::new(),
             comment: Vec::new(),
-            x: pad_x,
+            content_width: width,
+            x: margin_left,
             y,
             bounds: RECT {
                 left: 0,
                 top: y,
-                right: width + pad_x * 2,
+                right: width + margin_left,
                 bottom: y + line_height,
             },
             candidate_index: None,
@@ -1714,55 +2170,44 @@ fn build_rows(
             for (index, candidate, text, label, candidate_text, comment) in candidates {
                 let width = segmented_text_width(&label, &candidate_text, &comment, config);
                 let marked = snapshot.highlighted == Some(candidate.id);
-                let mark_inset = if config.layout.mark_width > 0 {
-                    config.layout.mark_gap.max(0)
-                        + config.layout.mark_width.max(0)
-                        + config.layout.hilite_spacing.max(0)
-                } else {
-                    0
-                };
-                rows.push(RowRender {
+                let mark_inset = mark_reservation(&config.layout);
+                let mut row = RowRender {
                     text: text.encode_utf16().collect(),
                     label: label.encode_utf16().collect(),
                     candidate: candidate_text.encode_utf16().collect(),
                     comment: comment.encode_utf16().collect(),
-                    x: pad_x + config.layout.hilite_padding_x.max(0) + mark_inset,
-                    y: y + config.layout.hilite_padding_y.max(0),
+                    content_width: width,
+                    x: 0,
+                    y: y + hilite_top,
                     bounds: RECT {
-                        left: pad_x,
+                        left: margin_left,
                         top: y,
-                        right: width
-                            + pad_x
-                            + config.layout.hilite_padding_x.max(0) * 2
-                            + mark_inset,
+                        right: width + margin_left + hilite_left + hilite_right + mark_inset,
                         bottom: y + line_height,
                     },
                     candidate_index: Some(index),
                     highlighted: marked,
-                });
+                };
+                align_row_text(&mut row, &config.layout);
+                rows.push(row);
                 y += line_height + config.layout.candidate_spacing.max(0);
             }
         }
         LayoutType::Horizontal => {
-            let mut x = pad_x;
+            let mut x = margin_left;
             for (index, candidate, text, label, candidate_text, comment) in candidates {
                 let width = segmented_text_width(&label, &candidate_text, &comment, config);
                 let marked = snapshot.highlighted == Some(candidate.id);
-                let mark_inset = if config.layout.mark_width > 0 {
-                    config.layout.mark_gap.max(0)
-                        + config.layout.mark_width.max(0)
-                        + config.layout.hilite_spacing.max(0)
-                } else {
-                    0
-                };
-                let right = x + width + config.layout.hilite_padding_x.max(0) * 2 + mark_inset;
-                rows.push(RowRender {
+                let mark_inset = mark_reservation(&config.layout);
+                let right = x + width + hilite_left + hilite_right + mark_inset;
+                let mut row = RowRender {
                     text: text.encode_utf16().collect(),
                     label: label.encode_utf16().collect(),
                     candidate: candidate_text.encode_utf16().collect(),
                     comment: comment.encode_utf16().collect(),
-                    x: x + config.layout.hilite_padding_x.max(0) + mark_inset,
-                    y: y + config.layout.hilite_padding_y.max(0),
+                    content_width: width,
+                    x: 0,
+                    y: y + hilite_top,
                     bounds: RECT {
                         left: x,
                         top: y,
@@ -1771,7 +2216,9 @@ fn build_rows(
                     },
                     candidate_index: Some(index),
                     highlighted: marked,
-                });
+                };
+                align_row_text(&mut row, &config.layout);
+                rows.push(row);
                 x = right + config.layout.candidate_spacing.max(0);
             }
             if rows.iter().any(|row| row.candidate_index.is_some()) {
@@ -1785,11 +2232,9 @@ fn build_rows(
         .map(|row| row.bounds.right)
         .max()
         .unwrap_or(0)
-        .max(pad_x * 2);
-    if config.layout.r#type == LayoutType::Horizontal {
-        width += pad_x;
-    }
-    let height = (y + pad_y).max(line_height);
+        .max(margin_left + margin_right);
+    width += margin_right;
+    let height = (y + margin_bottom).max(line_height);
     (rows, width, height)
 }
 
@@ -1812,14 +2257,45 @@ fn text_utf16_width(text: &[u16], char_width: i32) -> i32 {
 fn segmented_text_width(label: &str, candidate: &str, comment: &str, config: &StyleConfig) -> i32 {
     let mut width = text_pixel_width(candidate, config.font_point);
     if !label.is_empty() {
-        width +=
-            text_pixel_width(label, config.label_font_point) + config.layout.hilite_spacing.max(0);
+        width += text_pixel_width(label, config.label_font_point)
+            + config.layout.effective_label_spacing();
     }
     if !comment.is_empty() {
         width += text_pixel_width(comment, config.comment_font_point)
-            + config.layout.hilite_spacing.max(0);
+            + config.layout.effective_comment_spacing();
     }
     width
+}
+
+fn mark_reservation(layout: &LayoutConfig) -> i32 {
+    if layout.mark_width > 0 && layout.mark_height > 0 {
+        layout.mark_gap.max(0) + layout.mark_width.max(0) + layout.hilite_spacing.max(0)
+    } else {
+        0
+    }
+}
+
+fn align_row_text(row: &mut RowRender, layout: &LayoutConfig) {
+    let reservation = mark_reservation(layout);
+    let left_mark = if layout.mark_position == MarkPosition::Left {
+        reservation
+    } else {
+        0
+    };
+    let right_mark = if layout.mark_position == MarkPosition::Right {
+        reservation
+    } else {
+        0
+    };
+    let left = row.bounds.left + layout.effective_hilite_padding_left() + left_mark;
+    let right = row.bounds.right - layout.effective_hilite_padding_right() - right_mark;
+    let available = (right - left).max(0);
+    let content = row.content_width.min(available);
+    row.x = match layout.text_horizontal_align {
+        TextHorizontalAlign::Left => left,
+        TextHorizontalAlign::Center => left + (available - content) / 2,
+        TextHorizontalAlign::Right => right - content,
+    };
 }
 
 unsafe fn draw_selection_box(
@@ -1870,14 +2346,23 @@ unsafe fn draw_selection_box(
             .max(0)
             .min(bounds.bottom - bounds.top);
         if mark_width > 0 && mark_height > 0 {
-            let center_y = (bounds.top + bounds.bottom) / 2;
+            let center_y = (bounds.top + bounds.bottom) / 2 + config.style.layout.mark_offset_y;
+            let left = match config.style.layout.mark_position {
+                MarkPosition::Left => bounds.left + config.style.layout.mark_gap.max(0),
+                MarkPosition::Right => {
+                    bounds.right - config.style.layout.mark_gap.max(0) - mark_width
+                }
+            } + config.style.layout.mark_offset_x;
             let mark_bounds = RECT {
-                left: bounds.left + config.style.layout.mark_gap.max(0),
+                left,
                 top: center_y - mark_height / 2,
-                right: bounds.left + config.style.layout.mark_gap.max(0) + mark_width,
+                right: left + mark_width,
                 bottom: center_y + (mark_height + 1) / 2,
             };
-            let mark_path = rounded_path(mark_bounds, mark_width / 2);
+            let mark_path = rounded_path(
+                mark_bounds,
+                config.style.layout.effective_mark_corner_radius(),
+            );
             if !mark_path.is_null() {
                 let mut mark_brush: *mut GpSolidFill = std::ptr::null_mut();
                 if GdipCreateSolidFill(colorref_to_argb(mark), &mut mark_brush).0 == 0 {
@@ -2045,7 +2530,7 @@ unsafe fn apply_corner_radius(hwnd: HWND, width: i32, height: i32, configured_ra
     };
     if !region.is_invalid() {
         // SetWindowRgn takes ownership of the region on success.
-        if unsafe { SetWindowRgn(hwnd, region, true) } == 0 {
+        if unsafe { SetWindowRgn(hwnd, region, false) } == 0 {
             unsafe {
                 let _ = DeleteObject(region);
             }
@@ -2093,35 +2578,73 @@ fn parse_hex(s: &str) -> Option<COLORREF> {
 
 // ── TextExtent edit session (for GetTextExt) ──────────────────────────
 
-/// Lightweight COM callback that calls `ITfContextView::GetTextExt` inside a
-/// synchronous edit session and stores the result in a `Cell`.
+/// Lightweight COM callback that calls `ITfContextView::GetTextExt` inside an
+/// asynchronous read edit session and posts the owned result back to the UI.
+#[derive(Clone, Copy, Debug)]
+enum TextExtentOutcome {
+    Ready(RECT),
+    NoLayout,
+    Failed(HRESULT),
+}
+
 #[repr(C)]
 struct TextExtentSession {
     vtbl: &'static ITfEditSession_Vtbl,
     ref_count: AtomicU32,
+    hwnd: HWND,
+    generation: u64,
+    kind: TextExtentKind,
+    screen_extent: Option<RECT>,
+    alive: Rc<Cell<bool>>,
     view: ITfContextView,
-    range: ITfRange,
-    anchor: TfAnchor,
-    include_first_character: bool,
-    result: *const Cell<Option<RECT>>,
+    context: Option<ITfContext>,
+    range: Option<ITfRange>,
 }
 
 impl TextExtentSession {
-    fn new(
+    fn new_range(
+        hwnd: HWND,
+        generation: u64,
+        kind: TextExtentKind,
+        screen_extent: Option<RECT>,
+        alive: Rc<Cell<bool>>,
         view: ITfContextView,
         range: ITfRange,
-        anchor: TfAnchor,
-        include_first_character: bool,
-        result: *const Cell<Option<RECT>>,
     ) -> Box<Self> {
         Box::new(Self {
             vtbl: &TEXT_EXTENT_VTBL,
             ref_count: AtomicU32::new(1),
+            hwnd,
+            generation,
+            kind,
+            screen_extent,
+            alive,
             view,
-            range,
-            anchor,
-            include_first_character,
-            result,
+            context: None,
+            range: Some(range),
+        })
+    }
+
+    fn new_selection(
+        hwnd: HWND,
+        generation: u64,
+        kind: TextExtentKind,
+        screen_extent: Option<RECT>,
+        alive: Rc<Cell<bool>>,
+        view: ITfContextView,
+        context: ITfContext,
+    ) -> Box<Self> {
+        Box::new(Self {
+            vtbl: &TEXT_EXTENT_VTBL,
+            ref_count: AtomicU32::new(1),
+            hwnd,
+            generation,
+            kind,
+            screen_extent,
+            alive,
+            view,
+            context: Some(context),
+            range: None,
         })
     }
 
@@ -2185,33 +2708,94 @@ unsafe extern "system" fn tes_release(this: *mut c_void) -> u32 {
     unsafe { TextExtentSession::release(this) }
 }
 
+fn take_selection_range(
+    selection: &mut windows::Win32::UI::TextServices::TF_SELECTION,
+) -> Option<ITfRange> {
+    unsafe {
+        let stored = std::ptr::read(&selection.range);
+        std::ptr::write(&mut selection.range, std::mem::ManuallyDrop::new(None));
+        std::mem::ManuallyDrop::into_inner(stored)
+    }
+}
+
 unsafe extern "system" fn tes_do_edit_session(this: *mut c_void, ec: u32) -> HRESULT {
     let session = unsafe { &*(this as *const TextExtentSession) };
-    let mut rect = RECT::default();
-    let mut clipped = BOOL(0);
-    if unsafe { session.range.Collapse(ec, session.anchor) }.is_err() {
+    let range_result = if let Some(context) = &session.context {
+        use windows::Win32::UI::TextServices::{TF_DEFAULT_SELECTION, TF_SELECTION};
+        let mut selections = [TF_SELECTION::default()];
+        let mut fetched = 0u32;
+        let selection_result = unsafe {
+            context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selections, &mut fetched)
+        };
+        let range = take_selection_range(&mut selections[0]);
+        match selection_result {
+            Err(error) => Err(error.code()),
+            Ok(()) if fetched == 0 => Err(E_FAIL),
+            Ok(()) => range.ok_or(E_FAIL),
+        }
+    } else {
+        match &session.range {
+            Some(source_range) => unsafe { source_range.Clone() }.map_err(|error| error.code()),
+            None => Err(E_FAIL),
+        }
+    };
+    let outcome = match range_result {
+        Err(error) => TextExtentOutcome::Failed(error),
+        Ok(range) => {
+            let anchor = match session.kind {
+                TextExtentKind::CompositionStart => TF_ANCHOR_START,
+                TextExtentKind::Selection => TF_ANCHOR_END,
+            };
+            if let Err(error) = unsafe { range.Collapse(ec, anchor) } {
+                TextExtentOutcome::Failed(error.code())
+            } else {
+                let mut rect = RECT::default();
+                let mut clipped = BOOL(0);
+                let result =
+                    unsafe { session.view.GetTextExt(ec, &range, &mut rect, &mut clipped) };
+                match result {
+                    Ok(()) => TextExtentOutcome::Ready(rect),
+                    Err(error) if error.code() == TF_E_NOLAYOUT => TextExtentOutcome::NoLayout,
+                    Err(error) if error.code() == E_FAIL => {
+                        // Some text stores mask TS_E_NOLAYOUT as E_FAIL.
+                        let probe_point = POINT {
+                            x: i32::MIN,
+                            y: i32::MIN,
+                        };
+                        match unsafe { session.view.GetRangeFromPoint(ec, &probe_point, 0) } {
+                            Err(probe_error) if probe_error.code() == TF_E_NOLAYOUT => {
+                                TextExtentOutcome::NoLayout
+                            }
+                            _ => TextExtentOutcome::Failed(error.code()),
+                        }
+                    }
+                    Err(error) => TextExtentOutcome::Failed(error.code()),
+                }
+            }
+        }
+    };
+
+    if !session.alive.get() {
         return S_OK;
     }
-    if session.include_first_character {
-        let mut shifted = 0;
-        if unsafe {
-            session
-                .range
-                .ShiftEnd(ec, 1, &mut shifted, std::ptr::null())
-        }
-        .is_err()
-            || shifted != 1
-        {
-            return S_OK;
-        }
+    let update = Box::new(TextExtentUpdate {
+        generation: session.generation,
+        kind: session.kind,
+        outcome,
+        screen_extent: session.screen_extent,
+    });
+    let raw = Box::into_raw(update);
+    if unsafe {
+        PostMessageW(
+            session.hwnd,
+            WM_CHEIME_TEXT_EXTENT,
+            WPARAM(0),
+            LPARAM(raw as isize),
+        )
     }
-    let hr = unsafe {
-        session
-            .view
-            .GetTextExt(ec, &session.range, &mut rect, &mut clipped)
-    };
-    if hr.is_ok() {
-        unsafe { (*session.result).set(Some(rect)) };
+    .is_err()
+    {
+        drop(unsafe { Box::from_raw(raw) });
     }
     S_OK
 }
@@ -2283,12 +2867,52 @@ mod tests {
         assert!(rows.len() >= 2, "preedit + at least 1 candidate");
         // First row = preedit, not highlighted
         assert!(!rows[0].highlighted);
-        stretch_vertical_candidate_rows(&mut rows, 320, cfg.layout.margin_x);
+        stretch_vertical_candidate_rows(&mut rows, 320, &cfg.layout);
         assert!(
             rows.iter()
                 .filter(|row| row.candidate_index.is_some())
-                .all(|row| row.bounds.right == 320 - cfg.layout.margin_x)
+                .all(|row| row.bounds.right == 320 - cfg.layout.effective_margin_right())
         );
+    }
+
+    #[test]
+    fn asymmetric_padding_alignment_and_mark_side_share_one_layout_model() {
+        let mut layout = LayoutConfig {
+            text_horizontal_align: TextHorizontalAlign::Center,
+            hilite_padding_left: Some(20),
+            hilite_padding_right: Some(10),
+            mark_width: 3,
+            mark_height: 18,
+            mark_gap: 6,
+            hilite_spacing: 8,
+            mark_position: MarkPosition::Left,
+            ..Default::default()
+        };
+        let mut row = RowRender {
+            text: Vec::new(),
+            label: Vec::new(),
+            candidate: Vec::new(),
+            comment: Vec::new(),
+            content_width: 60,
+            x: 0,
+            y: 0,
+            bounds: RECT {
+                left: 10,
+                top: 0,
+                right: 210,
+                bottom: 40,
+            },
+            candidate_index: Some(0),
+            highlighted: true,
+        };
+
+        align_row_text(&mut row, &layout);
+        assert_eq!(row.x, 93);
+
+        layout.text_horizontal_align = TextHorizontalAlign::Right;
+        layout.mark_position = MarkPosition::Right;
+        align_row_text(&mut row, &layout);
+        assert_eq!(row.x, 123);
     }
 
     #[test]
@@ -2363,11 +2987,11 @@ mod tests {
     }
 
     #[test]
-    fn inline_anchor_prefers_composition_start_and_refreshes_cache() {
+    fn inline_anchor_pins_x_but_refreshes_y_from_the_composition() {
         let (anchor, cache) =
-            resolve_inline_anchor(Some((120, 240)), Some((80, 240)), Some((180, 240)));
-        assert_eq!(anchor, Some((120, 240)));
-        assert_eq!(cache, Some((120, 240)));
+            resolve_inline_anchor(Some((120, 240)), Some((80, 210)), Some((180, 200)));
+        assert_eq!(anchor, Some((80, 240)));
+        assert_eq!(cache, Some((80, 240)));
     }
 
     #[test]
@@ -2382,6 +3006,59 @@ mod tests {
         let (anchor, cache) = resolve_inline_anchor(None, None, Some((180, 240)));
         assert_eq!(anchor, Some((180, 240)));
         assert_eq!(cache, Some((180, 240)));
+    }
+
+    #[test]
+    fn position_retries_use_bounded_exponential_backoff() {
+        assert_eq!(position_retry_delay(0), Some(16));
+        assert_eq!(position_retry_delay(1), Some(32));
+        assert_eq!(position_retry_delay(5), Some(512));
+        assert_eq!(position_retry_delay(6), None);
+    }
+
+    #[test]
+    fn inline_text_extent_converts_client_coordinates_through_the_active_view() {
+        let active_view = RECT {
+            left: 800,
+            top: 400,
+            right: 1600,
+            bottom: 1000,
+        };
+        let client_coordinates = RECT {
+            left: 20,
+            top: 20,
+            right: 80,
+            bottom: 45,
+        };
+        assert_eq!(
+            normalize_text_extent(client_coordinates, Some(active_view), true),
+            Some(RECT {
+                left: 820,
+                top: 420,
+                right: 880,
+                bottom: 445,
+            })
+        );
+    }
+
+    #[test]
+    fn inline_text_extent_accepts_a_full_composition_inside_the_active_view() {
+        let active_view = RECT {
+            left: 800,
+            top: 400,
+            right: 1600,
+            bottom: 1000,
+        };
+        let composition = RECT {
+            left: 920,
+            top: 640,
+            right: 1040,
+            bottom: 670,
+        };
+        assert_eq!(
+            normalize_text_extent(composition, Some(active_view), true),
+            Some(composition)
+        );
     }
 
     #[test]

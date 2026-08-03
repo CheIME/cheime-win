@@ -65,6 +65,31 @@ pub fn check_key_with_guard(
     has_composition: bool,
     has_rollback_guard: bool,
 ) -> KeyAdmission {
+    check_key_with_locks(
+        mode,
+        cheime_activated,
+        key_code,
+        is_shift,
+        is_ctrl,
+        is_alt,
+        has_composition,
+        has_rollback_guard,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn check_key_with_locks(
+    mode: InputMode,
+    cheime_activated: bool,
+    key_code: u32,
+    is_shift: bool,
+    is_ctrl: bool,
+    is_alt: bool,
+    has_composition: bool,
+    has_rollback_guard: bool,
+    caps_lock_on: bool,
+) -> KeyAdmission {
     if !cheime_activated {
         // CheIME not active: only mode-toggle shortcut is accepted
         if is_ctrl && !is_shift && !is_alt && key_code == 0x20 {
@@ -86,14 +111,22 @@ pub fn check_key_with_guard(
             }
             KeyAdmission::PassThrough
         }
-        InputMode::Chinese => chinese_mode_keys(
-            key_code,
-            is_shift,
-            is_ctrl,
-            is_alt,
-            has_composition,
-            has_rollback_guard,
-        ),
+        InputMode::Chinese => {
+            // Caps Lock is an OS-level English-uppercase mode. Do not turn
+            // its A-Z keystrokes back into pinyin while Chinese mode is active.
+            if caps_lock_on && (0x41..=0x5A).contains(&key_code) {
+                KeyAdmission::PassThrough
+            } else {
+                chinese_mode_keys(
+                    key_code,
+                    is_shift,
+                    is_ctrl,
+                    is_alt,
+                    has_composition,
+                    has_rollback_guard,
+                )
+            }
+        }
     }
 }
 
@@ -159,8 +192,15 @@ fn chinese_mode_keys(
             }
         }
 
-        // Escape: handled
-        0x1B => KeyAdmission::Handled,
+        // Escape cancels an active composition. At idle it must pass through
+        // so applications can use it for dialogs, menus, games, and editors.
+        0x1B => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // Space: handle commit/select.  When no composition, pass-through
         // so the application receives a real space character.
@@ -191,11 +231,15 @@ fn chinese_mode_keys(
             }
         }
 
-        // PageUp/PageDown: handled
-        0x21 | 0x22 => KeyAdmission::Handled,
-
-        // Up/Down arrows: handled
-        0x26 | 0x28 => KeyAdmission::Handled,
+        // Candidate navigation is only meaningful while composing. Passing
+        // these keys through at idle preserves normal document navigation.
+        0x21 | 0x22 | 0x26 | 0x28 => {
+            if has_composition {
+                KeyAdmission::Handled
+            } else {
+                KeyAdmission::PassThrough
+            }
+        }
 
         // Left/Right: pass through (navigation in the app's text)
         0x25 | 0x27 => KeyAdmission::PassThrough,
@@ -395,6 +439,40 @@ mod tests {
     }
 
     #[test]
+    fn caps_lock_passes_letters_through_in_chinese_mode() {
+        for key in [VK_A, VK_Z] {
+            assert_eq!(
+                check_key_with_locks(
+                    InputMode::Chinese,
+                    true,
+                    key,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                ),
+                KeyAdmission::PassThrough
+            );
+        }
+        assert_eq!(
+            check_key_with_locks(
+                InputMode::Chinese,
+                true,
+                VK_A,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            KeyAdmission::Handled
+        );
+    }
+
+    #[test]
     fn chinese_mode_handles_special_keys() {
         // Backspace is handled when composition exists
         assert_eq!(
@@ -436,6 +514,18 @@ mod tests {
                 false,
                 false,
                 false
+            ),
+            KeyAdmission::PassThrough
+        );
+        assert_eq!(
+            check_key(
+                InputMode::Chinese,
+                true,
+                VK_ESCAPE,
+                false,
+                false,
+                false,
+                true
             ),
             KeyAdmission::Handled
         );
@@ -481,47 +571,17 @@ mod tests {
     }
 
     #[test]
-    fn chinese_mode_handles_page_and_arrows() {
-        assert_eq!(
-            check_key(
-                InputMode::Chinese,
-                true,
-                VK_PRIOR,
-                false,
-                false,
-                false,
-                false
-            ),
-            KeyAdmission::Handled
-        );
-        assert_eq!(
-            check_key(
-                InputMode::Chinese,
-                true,
-                VK_NEXT,
-                false,
-                false,
-                false,
-                false
-            ),
-            KeyAdmission::Handled
-        );
-        assert_eq!(
-            check_key(InputMode::Chinese, true, VK_UP, false, false, false, false),
-            KeyAdmission::Handled
-        );
-        assert_eq!(
-            check_key(
-                InputMode::Chinese,
-                true,
-                VK_DOWN,
-                false,
-                false,
-                false,
-                false
-            ),
-            KeyAdmission::Handled
-        );
+    fn chinese_mode_only_handles_page_and_arrows_while_composing() {
+        for key in [VK_PRIOR, VK_NEXT, VK_UP, VK_DOWN] {
+            assert_eq!(
+                check_key(InputMode::Chinese, true, key, false, false, false, false),
+                KeyAdmission::PassThrough
+            );
+            assert_eq!(
+                check_key(InputMode::Chinese, true, key, false, false, false, true),
+                KeyAdmission::Handled
+            );
+        }
     }
 
     #[test]

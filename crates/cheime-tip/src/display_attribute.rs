@@ -1,9 +1,11 @@
 use cheime_tip_core::ui_config::UnderlineStyle;
-use windows::Win32::Foundation::{BOOL, COLORREF};
+use std::cell::Cell;
+use windows::Win32::Foundation::{BOOL, COLORREF, E_POINTER, S_FALSE};
 use windows::Win32::UI::TextServices::{
-    ITfDisplayAttributeInfo, ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT, TF_CT_COLORREF,
-    TF_CT_NONE, TF_DA_COLOR, TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE, TF_LS_DASH, TF_LS_DOT, TF_LS_NONE,
-    TF_LS_SOLID, TF_LS_SQUIGGLE,
+    IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
+    ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT, TF_CT_COLORREF, TF_CT_NONE, TF_DA_COLOR,
+    TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE, TF_LS_DASH, TF_LS_DOT, TF_LS_NONE, TF_LS_SOLID,
+    TF_LS_SQUIGGLE,
 };
 use windows::core::{BSTR, GUID, Result, implement};
 
@@ -11,6 +13,39 @@ pub const GUID_CHEIME_PREEDIT: GUID = GUID::from_u128(0x7f3df1b4_3251_4da3_9f24_
 
 #[implement(ITfDisplayAttributeInfo)]
 pub struct PreeditDisplayAttribute;
+
+#[implement(IEnumTfDisplayAttributeInfo)]
+struct DisplayAttributeEnumerator {
+    yielded: Cell<bool>,
+}
+
+impl PreeditDisplayAttribute {
+    fn new() -> Self {
+        crate::exports::increment_object_count();
+        Self
+    }
+}
+
+impl Drop for PreeditDisplayAttribute {
+    fn drop(&mut self) {
+        crate::exports::decrement_object_count();
+    }
+}
+
+impl DisplayAttributeEnumerator {
+    fn new(yielded: bool) -> Self {
+        crate::exports::increment_object_count();
+        Self {
+            yielded: Cell::new(yielded),
+        }
+    }
+}
+
+impl Drop for DisplayAttributeEnumerator {
+    fn drop(&mut self) {
+        crate::exports::decrement_object_count();
+    }
+}
 
 #[allow(non_snake_case)]
 impl ITfDisplayAttributeInfo_Impl for PreeditDisplayAttribute_Impl {
@@ -45,7 +80,66 @@ impl ITfDisplayAttributeInfo_Impl for PreeditDisplayAttribute_Impl {
 }
 
 pub fn create_info() -> ITfDisplayAttributeInfo {
-    PreeditDisplayAttribute.into()
+    PreeditDisplayAttribute::new().into()
+}
+
+#[allow(non_snake_case)]
+impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
+    fn Clone(&self) -> Result<IEnumTfDisplayAttributeInfo> {
+        Ok(DisplayAttributeEnumerator::new(self.yielded.get()).into())
+    }
+
+    fn Next(
+        &self,
+        count: u32,
+        output: *mut Option<ITfDisplayAttributeInfo>,
+        fetched: *mut u32,
+    ) -> Result<()> {
+        if count > 0 && output.is_null() {
+            return Err(windows::core::Error::from_hresult(E_POINTER));
+        }
+        if count != 1 && fetched.is_null() {
+            return Err(windows::core::Error::from_hresult(E_POINTER));
+        }
+
+        let produced = u32::from(count > 0 && !self.yielded.replace(true));
+        if produced == 1 {
+            unsafe {
+                output.write(Some(create_info()));
+            }
+        }
+        if !fetched.is_null() {
+            unsafe {
+                fetched.write(produced);
+            }
+        }
+        if produced == count {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from_hresult(S_FALSE))
+        }
+    }
+
+    fn Reset(&self) -> Result<()> {
+        self.yielded.set(false);
+        Ok(())
+    }
+
+    fn Skip(&self, count: u32) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let available = u32::from(!self.yielded.replace(true));
+        if count <= available {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from_hresult(S_FALSE))
+        }
+    }
+}
+
+pub fn create_enumerator() -> IEnumTfDisplayAttributeInfo {
+    DisplayAttributeEnumerator::new(false).into()
 }
 
 pub fn current_attribute() -> TF_DISPLAYATTRIBUTE {

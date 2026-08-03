@@ -34,6 +34,12 @@ pub struct StyleConfig {
     pub label_font_point: i32,
     #[serde(default = "comment_font_point")]
     pub comment_font_point: i32,
+    #[serde(default = "font_weight")]
+    pub font_weight: i32,
+    #[serde(default = "font_weight")]
+    pub label_font_weight: i32,
+    #[serde(default = "font_weight")]
+    pub comment_font_weight: i32,
     #[serde(default = "page_size")]
     pub page_size: usize,
     #[serde(default = "bool_true")]
@@ -73,6 +79,8 @@ pub struct LayoutConfig {
     pub r#type: LayoutType,
     #[serde(default)]
     pub text_vertical_align: TextVerticalAlign,
+    #[serde(default)]
+    pub text_horizontal_align: TextHorizontalAlign,
     #[serde(default = "min_width")]
     pub min_width: i32,
     #[serde(default)]
@@ -81,16 +89,38 @@ pub struct LayoutConfig {
     pub margin_x: i32,
     #[serde(default = "margin_y")]
     pub margin_y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_left: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_right: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_top: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_bottom: Option<i32>,
     #[serde(default = "spacing")]
     pub spacing: i32,
     #[serde(default = "candidate_spacing")]
     pub candidate_spacing: i32,
     #[serde(default = "hilite_spacing")]
     pub hilite_spacing: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_spacing: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_spacing: Option<i32>,
     #[serde(default = "hilite_padding_x")]
     pub hilite_padding_x: i32,
     #[serde(default = "hilite_padding_y")]
     pub hilite_padding_y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hilite_padding_left: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hilite_padding_right: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hilite_padding_top: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hilite_padding_bottom: Option<i32>,
+    #[serde(default)]
+    pub candidate_min_height: i32,
     #[serde(default = "corner_radius")]
     pub corner_radius: i32,
     #[serde(default = "hilited_corner_radius")]
@@ -105,6 +135,14 @@ pub struct LayoutConfig {
     pub mark_height: i32,
     #[serde(default = "mark_gap")]
     pub mark_gap: i32,
+    #[serde(default)]
+    pub mark_position: MarkPosition,
+    #[serde(default)]
+    pub mark_offset_x: i32,
+    #[serde(default)]
+    pub mark_offset_y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_corner_radius: Option<i32>,
     #[serde(default = "bool_true")]
     pub shadow_enabled: bool,
     #[serde(default)]
@@ -138,6 +176,79 @@ pub enum TextVerticalAlign {
     #[default]
     Center,
     Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextHorizontalAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkPosition {
+    #[default]
+    Left,
+    Right,
+}
+
+impl LayoutConfig {
+    pub fn effective_margin_left(&self) -> i32 {
+        self.margin_left.unwrap_or(self.margin_x).max(0)
+    }
+
+    pub fn effective_margin_right(&self) -> i32 {
+        self.margin_right.unwrap_or(self.margin_x).max(0)
+    }
+
+    pub fn effective_margin_top(&self) -> i32 {
+        self.margin_top.unwrap_or(self.margin_y).max(0)
+    }
+
+    pub fn effective_margin_bottom(&self) -> i32 {
+        self.margin_bottom.unwrap_or(self.margin_y).max(0)
+    }
+
+    pub fn effective_hilite_padding_left(&self) -> i32 {
+        self.hilite_padding_left
+            .unwrap_or(self.hilite_padding_x)
+            .max(0)
+    }
+
+    pub fn effective_hilite_padding_right(&self) -> i32 {
+        self.hilite_padding_right
+            .unwrap_or(self.hilite_padding_x)
+            .max(0)
+    }
+
+    pub fn effective_hilite_padding_top(&self) -> i32 {
+        self.hilite_padding_top
+            .unwrap_or(self.hilite_padding_y)
+            .max(0)
+    }
+
+    pub fn effective_hilite_padding_bottom(&self) -> i32 {
+        self.hilite_padding_bottom
+            .unwrap_or(self.hilite_padding_y)
+            .max(0)
+    }
+
+    pub fn effective_label_spacing(&self) -> i32 {
+        self.label_spacing.unwrap_or(self.hilite_spacing).max(0)
+    }
+
+    pub fn effective_comment_spacing(&self) -> i32 {
+        self.comment_spacing.unwrap_or(self.hilite_spacing).max(0)
+    }
+
+    pub fn effective_mark_corner_radius(&self) -> i32 {
+        self.mark_corner_radius
+            .unwrap_or_else(|| self.mark_width.max(0) / 2)
+            .max(0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -320,6 +431,9 @@ impl Default for StyleConfig {
             font_point: font_point(),
             label_font_point: label_font_point(),
             comment_font_point: comment_font_point(),
+            font_weight: font_weight(),
+            label_font_weight: font_weight(),
+            comment_font_weight: font_weight(),
             page_size: page_size(),
             show_labels: true,
             show_candidate_annotations: true,
@@ -344,22 +458,38 @@ impl Default for LayoutConfig {
         Self {
             r#type: LayoutType::Vertical,
             text_vertical_align: TextVerticalAlign::Center,
+            text_horizontal_align: TextHorizontalAlign::Left,
             min_width: min_width(),
             max_width: 0,
             margin_x: margin_x(),
             margin_y: margin_y(),
+            margin_left: None,
+            margin_right: None,
+            margin_top: None,
+            margin_bottom: None,
             spacing: spacing(),
             candidate_spacing: candidate_spacing(),
             hilite_spacing: hilite_spacing(),
+            label_spacing: None,
+            comment_spacing: None,
             hilite_padding_x: hilite_padding_x(),
             hilite_padding_y: hilite_padding_y(),
+            hilite_padding_left: None,
+            hilite_padding_right: None,
+            hilite_padding_top: None,
+            hilite_padding_bottom: None,
+            candidate_min_height: 0,
             corner_radius: corner_radius(),
             hilited_corner_radius: hilited_corner_radius(),
-            border_width: 0,
+            border_width: border_width(),
             hilited_border_width: border_width(),
             mark_width: mark_width(),
             mark_height: mark_height(),
             mark_gap: mark_gap(),
+            mark_position: MarkPosition::Left,
+            mark_offset_x: 0,
+            mark_offset_y: 0,
+            mark_corner_radius: None,
             shadow_enabled: true,
             shadow_radius: 0,
             shadow_opacity: shadow_opacity(),
@@ -432,6 +562,9 @@ fn label_font_point() -> i32 {
 fn comment_font_point() -> i32 {
     13
 }
+fn font_weight() -> i32 {
+    400
+}
 fn page_size() -> usize {
     5
 }
@@ -481,7 +614,7 @@ fn mark_gap() -> i32 {
     6
 }
 fn caret_offset_y() -> i32 {
-    8
+    0
 }
 fn shadow_opacity() -> i32 {
     28
@@ -566,5 +699,43 @@ mod tests {
         assert_eq!(parsed.style.layout.shadow_opacity, 28);
         assert_eq!(parsed.style.layout.shadow_offset_x, 0);
         assert_eq!(parsed.style.layout.shadow_offset_y, 0);
+    }
+
+    #[test]
+    fn asymmetric_layout_values_fall_back_to_legacy_axes() {
+        let mut layout = LayoutConfig {
+            margin_x: 17,
+            margin_y: 9,
+            hilite_padding_x: 11,
+            hilite_padding_y: 7,
+            hilite_spacing: 5,
+            ..Default::default()
+        };
+        assert_eq!(layout.effective_margin_left(), 17);
+        assert_eq!(layout.effective_margin_bottom(), 9);
+        assert_eq!(layout.effective_hilite_padding_right(), 11);
+        assert_eq!(layout.effective_hilite_padding_top(), 7);
+        assert_eq!(layout.effective_label_spacing(), 5);
+
+        layout.margin_left = Some(3);
+        layout.hilite_padding_bottom = Some(13);
+        layout.comment_spacing = Some(19);
+        assert_eq!(layout.effective_margin_left(), 3);
+        assert_eq!(layout.effective_margin_right(), 17);
+        assert_eq!(layout.effective_hilite_padding_bottom(), 13);
+        assert_eq!(layout.effective_comment_spacing(), 19);
+    }
+
+    #[test]
+    fn repository_ui_preset_uses_the_extended_schema() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/ui.yaml");
+        let config = load_ui_config(&path).unwrap();
+        assert_eq!(
+            config.style.layout.text_horizontal_align,
+            TextHorizontalAlign::Left
+        );
+        assert_eq!(config.style.layout.margin_left, Some(6));
+        assert_eq!(config.style.layout.border_width, 1);
+        assert_eq!(config.style.font_weight, 400);
     }
 }

@@ -10,6 +10,9 @@ style:
   font_point: 16
   label_font_point: 12
   comment_font_point: 12
+  font_weight: 400
+  label_font_weight: 400
+  comment_font_weight: 400
   page_size: 5
   show_labels: true
   show_candidate_annotations: true
@@ -21,25 +24,42 @@ style:
   layout:
     type: horizontal
     text_vertical_align: center
+    text_horizontal_align: left
     min_width: 320
     margin_x: 6
     margin_y: 6
+    margin_left: 6
+    margin_right: 6
+    margin_top: 6
+    margin_bottom: 6
     spacing: 4
     candidate_spacing: 4
     hilite_spacing: 6
+    label_spacing: 6
+    comment_spacing: 6
     hilite_padding_x: 10
     hilite_padding_y: 6
+    hilite_padding_left: 10
+    hilite_padding_right: 10
+    hilite_padding_top: 6
+    hilite_padding_bottom: 6
+    candidate_min_height: 0
     corner_radius: 8
     hilited_corner_radius: 5
+    border_width: 1
     hilited_border_width: 1
     mark_width: 3
     mark_height: 18
     mark_gap: 6
+    mark_position: left
+    mark_offset_x: 0
+    mark_offset_y: 0
+    mark_corner_radius: 1
     shadow_enabled: true
     shadow_radius: 12
     shadow_opacity: 28
     shadow_offset_y: 4
-    caret_offset_y: 8
+    caret_offset_y: 0
     screen_edge_margin: 12
 
 preset_color_schemes:

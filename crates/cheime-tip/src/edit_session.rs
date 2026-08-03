@@ -9,8 +9,10 @@ use cheime_model::{
     CommitToken, PlatformAction, PlatformActionKind, PlatformActionOutcome, PlatformActionResult,
 };
 use cheime_protocol::FrontendMessage;
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::sync::mpsc::SyncSender;
@@ -20,13 +22,13 @@ use windows::Win32::UI::TextServices::{
     CLSID_TF_CategoryMgr, GUID_PROP_ATTRIBUTE, ITfCategoryMgr, ITfComposition, ITfCompositionSink,
     ITfContext, ITfContextComposition, ITfEditSession, ITfEditSession_Vtbl, ITfInsertAtSelection,
     TF_ANCHOR_END, TF_ANCHOR_START, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_DEFAULT_SELECTION,
-    TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_NO_DEFAULT_COMPOSITION, TF_SELECTION,
+    TF_ES_ASYNC, TF_ES_READWRITE, TF_IAS_NO_DEFAULT_COMPOSITION, TF_SELECTION,
 };
 use windows::core::{HRESULT, IUnknown, IUnknown_Vtbl, Interface};
 
 use crate::rollback_guard::{RollbackGuard, monotonic_ms};
 // Re-export tsf_log from parent module for use in edit session tracing.
-use crate::tsf_interfaces::tsf_log;
+use crate::tsf_interfaces::{owner_from_composition, tsf_log};
 
 pub const S_OK: HRESULT = HRESULT(0);
 pub const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
@@ -40,15 +42,14 @@ struct EditSessionData {
     action: Option<PlatformAction>,
     commit_token: Option<CommitToken>,
     guarded_backspace: bool,
-    /// Raw pointer to a `SyncSender<FrontendMessage>` stored in `WindowContext`.
-    /// Safe because the channel outlives all queued edit sessions.
-    channel: *const SyncSender<FrontendMessage>,
-    /// Raw pointer to the `Mutex<Option<ITfComposition>>` in `WindowContext`.
-    /// Safe because the composition mutex outlives all queued edit sessions.
-    composition: *const Mutex<Option<ITfComposition>>,
-    composition_sink: Option<*mut c_void>,
-    guard: *const Mutex<RollbackGuard>,
-    anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+    // Every dependency is owned by the callback. TSF is allowed to run an
+    // asynchronous edit session after the candidate window has been destroyed.
+    channel: SyncSender<FrontendMessage>,
+    composition: Rc<Mutex<Option<ITfComposition>>>,
+    composition_sink: Option<ITfCompositionSink>,
+    guard: Rc<Mutex<RollbackGuard>>,
+    anchor: Rc<Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>>,
+    alive: Rc<Cell<bool>>,
 }
 
 // ── COM callback object ─────────────────────────────────────────────────────
@@ -156,8 +157,30 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
         Some(d) => d,
         None => return S_OK,
     };
+    if !data.alive.get() {
+        if let Some(action) = data.action.as_ref() {
+            send_result(
+                action,
+                &data.channel,
+                &Err("TIP deactivated before edit session ran".to_owned()),
+            );
+        }
+        if let Ok(mut guard) = data.guard.lock() {
+            guard.disarm();
+        }
+        if let Ok(mut anchor) = data.anchor.lock() {
+            anchor.take();
+        }
+        return S_OK;
+    }
     if data.guarded_backspace {
-        return handle_guarded_backspace(ec, &data.context, data.channel, data.guard, data.anchor);
+        return handle_guarded_backspace(
+            ec,
+            &data.context,
+            &data.channel,
+            Rc::as_ptr(&data.guard),
+            Rc::as_ptr(&data.anchor),
+        );
     }
     let Some(action) = data.action.as_ref() else {
         return S_OK;
@@ -165,27 +188,41 @@ unsafe extern "system" fn es_do_edit_session(this: *mut c_void, ec: u32) -> HRES
     match &action.kind {
         PlatformActionKind::Commit { text } => {
             tsf_log(&format!("[CheIME] edit: Commit text={text:?}"));
-            handle_commit(ec, &data, text, action)
+            handle_commit(
+                ec,
+                &data,
+                text,
+                action,
+                &data.channel,
+                Rc::as_ptr(&data.composition),
+                Rc::as_ptr(&data.guard),
+                Rc::as_ptr(&data.anchor),
+                data.composition_sink.as_ref(),
+            )
         }
         PlatformActionKind::SetPreedit { text, cursor } => {
             tsf_log(&format!(
                 "[CheIME] edit: SetPreedit text={text:?} cursor={cursor}"
             ));
+            let Some(composition_sink) = data.composition_sink.as_ref() else {
+                let result = Err("SetPreedit edit session has no composition sink".to_owned());
+                send_result(action, &data.channel, &result);
+                return S_OK;
+            };
             handle_set_preedit(
                 ec,
                 &data.context,
                 text,
                 *cursor,
-                data.channel,
-                data.composition,
-                data.composition_sink
-                    .expect("SetPreedit edit sessions always carry a composition sink"),
+                &data.channel,
+                Rc::as_ptr(&data.composition),
+                composition_sink.as_raw(),
                 action,
             )
         }
         PlatformActionKind::CancelComposition => {
             tsf_log("[CheIME] edit: CancelComposition");
-            handle_cancel_composition(ec, data.composition, data.channel, action)
+            handle_cancel_composition(ec, Rc::as_ptr(&data.composition), &data.channel, action)
         }
     }
 }
@@ -204,26 +241,41 @@ static EDIT_SESSION_VTBL: ITfEditSession_Vtbl = ITfEditSession_Vtbl {
 /// Handle `Commit`: replace composition text, end composition, send result.
 /// Uses the active composition range (not cursor selection) so the correct text
 /// is replaced even if the caret has moved.
-fn handle_commit(ec: u32, data: &EditSessionData, text: &str, action: &PlatformAction) -> HRESULT {
+#[allow(clippy::too_many_arguments)]
+fn handle_commit(
+    ec: u32,
+    data: &EditSessionData,
+    text: &str,
+    action: &PlatformAction,
+    channel: *const SyncSender<FrontendMessage>,
+    composition: *const Mutex<Option<ITfComposition>>,
+    guard: *const Mutex<RollbackGuard>,
+    anchor_state: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+    composition_sink: Option<&ITfCompositionSink>,
+) -> HRESULT {
     tsf_log(&format!(
         "[CheIME] handle_commit START text={text:?} ec={ec}"
     ));
     // Replace the active composition range when inline preedit is present.  Inserting
     // at the current selection would leave the visible pinyin behind in hosts whose
     // selection sits at the end of the composition.
-    let result = commit_active_composition(ec, &data.context, data.composition, text)
+    let result = commit_active_composition(ec, &data.context, composition, text)
         .or_else(|_| commit_at_selection(ec, &data.context, text));
     if let Ok(anchor) = result.as_ref() {
         // Clean up composition state regardless
-        let _ = end_active_composition(ec, data.composition);
+        let _ = end_active_composition(ec, composition);
         if let Some(token) = data.commit_token {
-            arm_rollback_guard(&data.context, token, anchor, data.guard, data.anchor);
+            arm_rollback_guard(&data.context, token, anchor, guard, anchor_state);
+        }
+        if let Some(composition_sink) = composition_sink {
+            let owner = unsafe { owner_from_composition(composition_sink.as_raw()) };
+            unsafe { (*owner).suppress_text_edit_notifications(true) };
         }
         tsf_log("[CheIME] handle_commit SUCCESS");
     }
     tsf_log(&format!("[CheIME] handle_commit RESULT: {result:?}"));
     let outcome = result.map(|_| ());
-    send_result(action, data.channel, &outcome);
+    send_result(action, channel, &outcome);
     S_OK
 }
 
@@ -242,6 +294,32 @@ fn handle_set_preedit(
     action: &PlatformAction,
 ) -> HRESULT {
     let result = 'work: {
+        // An empty preedit means the engine has finished/cancelled the
+        // composition (commonly after the final Backspace). Merely setting an
+        // active TSF range to empty leaves the host in an invisible
+        // composition state, where applications may continue suppressing
+        // arrows, Escape, and other navigation keys.
+        if text.is_empty() {
+            let composition_mutex = unsafe { &*composition_ptr };
+            let composition = match composition_mutex.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(_) => break 'work Err("composition mutex poisoned".into()),
+            };
+            if let Some(composition) = composition {
+                let range = match unsafe { composition.GetRange() } {
+                    Ok(range) => range,
+                    Err(error) => break 'work Err(format!("GetRange: {error}")),
+                };
+                if let Err(error) = unsafe { range.SetText(ec, 0, &[]) } {
+                    break 'work Err(format!("clear empty preedit: {error}"));
+                }
+                if let Err(error) = unsafe { composition.EndComposition(ec) } {
+                    break 'work Err(format!("end empty composition: {error}"));
+                }
+            }
+            break 'work Ok(());
+        }
+
         let display_text = format_inline_pinyin(text);
         let text_wide: Vec<u16> = display_text.encode_utf16().collect();
         let composition_mutex = unsafe { &*composition_ptr };
@@ -701,13 +779,14 @@ pub fn request_edit_session(
     context: &ITfContext,
     action: PlatformAction,
     commit_token: CommitToken,
-    channel: *const SyncSender<FrontendMessage>,
-    composition: *const Mutex<Option<ITfComposition>>,
-    composition_sink: *mut c_void,
-    guard: *const Mutex<RollbackGuard>,
-    anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+    channel: SyncSender<FrontendMessage>,
+    composition: Rc<Mutex<Option<ITfComposition>>>,
+    composition_sink: ITfCompositionSink,
+    guard: Rc<Mutex<RollbackGuard>>,
+    anchor: Rc<Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>>,
+    alive: Rc<Cell<bool>>,
 ) {
-    let channel_backup = channel;
+    let channel_backup = channel.clone();
     let action_backup = action.clone();
     let data = EditSessionData {
         context: context.clone(),
@@ -717,8 +796,9 @@ pub fn request_edit_session(
         channel,
         composition,
         composition_sink: Some(composition_sink),
-        guard,
-        anchor,
+        guard: guard.clone(),
+        anchor: anchor.clone(),
+        alive,
     };
     let callback = EditSessionCallback::new(data); // ref_count = 1
 
@@ -736,8 +816,10 @@ pub fn request_edit_session(
         }
     };
 
-    // Request a synchronous write edit session.
-    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0);
+    // This request originates from a window message, not a TSF key callback.
+    // Strict text stores may reject TF_ES_SYNC here, so the owned callback is
+    // scheduled asynchronously.
+    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_ASYNC.0 | TF_ES_READWRITE.0);
     tsf_log(&format!(
         "[CheIME] RequestEditSession: client_id={client_id} flags={flags:?}"
     ));
@@ -749,28 +831,26 @@ pub fn request_edit_session(
     // and the object is freed.
     unsafe { EditSessionCallback::release(raw_void) };
 
-    if hr.is_err() {
-        // TSF rejected the edit session — report failure so the engine
-        // doesn't wait indefinitely for a result.
-        send_result(
-            &action_backup,
-            channel_backup,
-            &Err(format!("RequestEditSession: {hr:?}")),
-        );
+    let rejection = match hr {
+        Err(error) => Some(format!("RequestEditSession call: {error}")),
+        Ok(session_hr) if session_hr.is_err() => {
+            Some(format!("RequestEditSession callback: {session_hr:?}"))
+        }
+        Ok(_) => None,
+    };
+    if let Some(reason) = rejection {
+        send_result(&action_backup, &channel_backup, &Err(reason));
     }
 }
 
-/// # Safety
-///
-/// All raw pointers must remain valid for the duration of the synchronous TSF
-/// edit-session request.
-pub unsafe fn request_guarded_backspace(
+pub fn request_guarded_backspace(
     client_id: u32,
     context: &ITfContext,
-    channel: *const SyncSender<FrontendMessage>,
-    composition: *const Mutex<Option<ITfComposition>>,
-    guard: *const Mutex<RollbackGuard>,
-    anchor: *const Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>,
+    channel: SyncSender<FrontendMessage>,
+    composition: Rc<Mutex<Option<ITfComposition>>>,
+    guard: Rc<Mutex<RollbackGuard>>,
+    anchor: Rc<Mutex<Option<windows::Win32::UI::TextServices::ITfRange>>>,
+    alive: Rc<Cell<bool>>,
 ) {
     let data = EditSessionData {
         context: context.clone(),
@@ -780,8 +860,9 @@ pub unsafe fn request_guarded_backspace(
         channel,
         composition,
         composition_sink: None,
-        guard,
-        anchor,
+        guard: guard.clone(),
+        anchor: anchor.clone(),
+        alive,
     };
     let callback = EditSessionCallback::new(data);
     let raw = Box::into_raw(callback);
@@ -790,18 +871,23 @@ pub unsafe fn request_guarded_backspace(
         unsafe { EditSessionCallback::release(raw_void) };
         return;
     };
-    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0);
+    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_ASYNC.0 | TF_ES_READWRITE.0);
     let hr = unsafe { context.RequestEditSession(client_id, session_ref, flags) };
     unsafe { EditSessionCallback::release(raw_void) };
-    if hr.is_err() {
-        if let Ok(mut guard) = unsafe { &*guard }.lock() {
+    let rejection = match hr {
+        Err(error) => Some(format!("RequestEditSession call: {error}")),
+        Ok(session_hr) if session_hr.is_err() => {
+            Some(format!("RequestEditSession callback: {session_hr:?}"))
+        }
+        Ok(_) => None,
+    };
+    if let Some(reason) = rejection {
+        if let Ok(mut guard) = guard.lock() {
             guard.disarm();
         }
-        if let Ok(mut anchor) = unsafe { &*anchor }.lock() {
+        if let Ok(mut anchor) = anchor.lock() {
             anchor.take();
         }
-        tsf_log(&format!(
-            "[CheIME] guarded backspace RequestEditSession failed: {hr:?}"
-        ));
+        tsf_log(&format!("[CheIME] guarded backspace rejected: {reason}"));
     }
 }

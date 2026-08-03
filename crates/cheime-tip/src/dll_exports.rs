@@ -3,7 +3,7 @@
 use crate::class_factory::ClassFactory;
 use crate::exports::{CHEIME_TIP_NAME, live_object_count, server_lock_count};
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
     BOOL, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HMODULE, RPC_E_CHANGED_MODE, WIN32_ERROR,
 };
@@ -20,7 +20,9 @@ use windows::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
-use windows::Win32::UI::TextServices::ITfInputProcessorProfileMgr;
+use windows::Win32::UI::TextServices::{
+    GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, ITfInputProcessorProfileMgr,
+};
 use windows::core::{GUID, HRESULT, Interface, PCWSTR};
 
 pub const CLSID_CHEIME_TIP: GUID = GUID::from_u128(0xB5F1C9A8_3E7D_4A15_AE2D_F89C1B6E3A07);
@@ -37,6 +39,7 @@ pub const PROFILE_ENABLED: bool = true;
 const CLSID_TEXT: &str = "{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}";
 const PROFILE_TEXT: &str = "{D7E2A3B4-C5F6-7890-ABCD-EF1234567890}";
 const CATEGORY_TEXT: &str = "{34745C63-B2F0-4784-8B67-5E12C8701A31}";
+const DISPLAY_ATTRIBUTE_CATEGORY_TEXT: &str = "{046B8C80-1647-40F7-9B21-B93B81AABC1B}";
 const S_OK: HRESULT = HRESULT(0);
 const S_FALSE: HRESULT = HRESULT(1);
 const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
@@ -112,6 +115,10 @@ fn registration_plan(dll_path: &str) -> RegistrationPlan {
             RegistryWrite::key(
                 RegistryHive::LocalMachine,
                 &format!("{clsid_path}\\Implemented Categories\\{CATEGORY_TEXT}"),
+            ),
+            RegistryWrite::key(
+                RegistryHive::LocalMachine,
+                &format!("{clsid_path}\\Implemented Categories\\{DISPLAY_ATTRIBUTE_CATEGORY_TEXT}"),
             ),
             RegistryWrite::string(
                 RegistryHive::LocalMachine,
@@ -279,6 +286,25 @@ fn module_path_from_address(address: *const c_void) -> windows::core::Result<Pat
     }
 }
 
+fn module_asset_candidates(module_path: &Path, name: &str) -> [PathBuf; 2] {
+    let sibling = module_path.with_file_name(name);
+    let parent_bundle = module_path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new(""))
+        .join(name);
+    [sibling, parent_bundle]
+}
+
+fn module_asset_path(module_path: &Path, name: &str) -> PathBuf {
+    let candidates = module_asset_candidates(module_path, name);
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
+}
+
 struct ComApartment {
     uninitialize: bool,
 }
@@ -318,8 +344,8 @@ fn with_profile_manager(
 fn register_profile() -> windows::core::Result<()> {
     with_profile_manager(|manager| {
         let description: Vec<u16> = CHEIME_TIP_NAME.encode_utf16().collect();
-        let icon_path = module_path_from_address(DllRegisterServer as *const c_void)?
-            .with_file_name("cheime.ico");
+        let module_path = module_path_from_address(DllRegisterServer as *const c_void)?;
+        let icon_path = module_asset_path(&module_path, "cheime.ico");
         let icon_file: Vec<u16> = icon_path.to_string_lossy().encode_utf16().collect();
         unsafe {
             manager.RegisterProfile(
@@ -369,6 +395,11 @@ fn register_profile() -> windows::core::Result<()> {
                 &CLSID_CHEIME_TIP,
                 &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
                 &CLSID_CHEIME_TIP,
+            )?;
+            category_mgr.RegisterCategory(
+                &CLSID_CHEIME_TIP,
+                &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+                &CLSID_CHEIME_TIP,
             )
         }
     })
@@ -387,6 +418,11 @@ fn unregister_profile() -> windows::core::Result<()> {
         category_mgr.UnregisterCategory(
             &CLSID_CHEIME_TIP,
             &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            &CLSID_CHEIME_TIP,
+        )?;
+        category_mgr.UnregisterCategory(
+            &CLSID_CHEIME_TIP,
+            &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
             &CLSID_CHEIME_TIP,
         )
     });
@@ -606,25 +642,24 @@ mod tests {
 
     #[test]
     fn registration_rolls_back_all_registration_surfaces_after_failure() {
-        // registration_plan has 4 writes. Index 5 (0-based: 4) is RegisterProfile.
-        // Failing at index 5 means: 4 writes pass (indices 0-3), RegisterProfile fails (index 4).
-        let mut executor = FakeExecutor::failing_at(4);
+        // registration_plan has 5 writes. RegisterProfile is operation 5.
+        let mut executor = FakeExecutor::failing_at(5);
         let error =
             register_with_executor(&mut executor, r"C:\Program Files\CheIME\cheime-tip.dll")
                 .expect_err("profile failure must fail registration");
         assert_eq!(error.code(), HRESULT(0x8000_4005u32 as i32));
-        // writes: 4 (indices 0-3) + register (index 4, FAILS) = 5
+        // writes: 5 + register (FAILS) = 6
         // rollback: unregister (1) + 2 deletes = 3
-        // total: 5 + 3 = 8
-        assert_eq!(executor.operations.len(), 8);
-        assert_eq!(executor.operations[4], RecordedOperation::RegisterProfile);
-        assert_eq!(executor.operations[5], RecordedOperation::UnregisterProfile);
+        // total: 6 + 3 = 9
+        assert_eq!(executor.operations.len(), 9);
+        assert_eq!(executor.operations[5], RecordedOperation::RegisterProfile);
+        assert_eq!(executor.operations[6], RecordedOperation::UnregisterProfile);
         assert!(matches!(
-            executor.operations[6],
+            executor.operations[7],
             RecordedOperation::Delete(_)
         ));
         assert!(matches!(
-            executor.operations[7],
+            executor.operations[8],
             RecordedOperation::Delete(_)
         ));
     }
@@ -657,7 +692,7 @@ mod tests {
     #[test]
     fn registration_plan_uses_exact_hives_paths_and_values() {
         let plan = registration_plan(r"C:\Program Files\CheIME\cheime-tip.dll");
-        assert_eq!(plan.registry_writes.len(), 4);
+        assert_eq!(plan.registry_writes.len(), 5);
         assert_eq!(
             plan.registry_writes[0],
             RegistryWrite::string(
@@ -685,6 +720,13 @@ mod tests {
         );
         assert_eq!(
             plan.registry_writes[3],
+            RegistryWrite::key(
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Classes\CLSID\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\Implemented Categories\{046B8C80-1647-40F7-9B21-B93B81AABC1B}",
+            )
+        );
+        assert_eq!(
+            plan.registry_writes[4],
             RegistryWrite::string(
                 RegistryHive::LocalMachine,
                 r"SOFTWARE\Microsoft\CTF\TIP\{B5F1C9A8-3E7D-4A15-AE2D-F89C1B6E3A07}\LanguageProfile\0x00000804\{D7E2A3B4-C5F6-7890-ABCD-EF1234567890}",
@@ -738,5 +780,20 @@ mod tests {
         let export_address = DllRegisterServer as *const c_void as usize;
         assert!(export_address != 0);
         assert!(module_path.is_absolute());
+    }
+
+    #[test]
+    fn profile_icon_falls_back_from_versioned_tip_directory_to_bundle_bin() {
+        let module = Path::new(r"C:\Users\test\AppData\Local\CheIME\bin\tip-abc\cheime-tip.dll");
+        let candidates = module_asset_candidates(module, "cheime.ico");
+
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(r"C:\Users\test\AppData\Local\CheIME\bin\tip-abc\cheime.ico")
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(r"C:\Users\test\AppData\Local\CheIME\bin\cheime.ico")
+        );
     }
 }

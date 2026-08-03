@@ -43,12 +43,25 @@ Write-Step "cargo build --release"
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
+$x86Target = "i686-pc-windows-msvc"
+if (-not ((rustup target list --installed) -contains $x86Target)) {
+    Write-Step "Installing Rust x86 target"
+    rustup target add $x86Target
+    if ($LASTEXITCODE -ne 0) { throw "failed to install Rust target $x86Target" }
+}
+
+Write-Step "cargo build --release --target $x86Target -p cheime-tip"
+cargo build --release --target $x86Target -p cheime-tip
+if ($LASTEXITCODE -ne 0) { throw "x86 TIP build failed" }
+
 # Validate required artifacts
 $releaseDir = Join-Path $repoRoot "target\release"
+$x86ReleaseDir = Join-Path $repoRoot "target\$x86Target\release"
 $artifacts = @{
     "cheime-engine.exe"       = Join-Path $releaseDir "cheime-engine.exe"
     "cheime-ui.exe"           = Join-Path $releaseDir "cheime-ui.exe"
     "cheime_tip.dll"          = Join-Path $releaseDir "cheime_tip.dll"
+    "cheime_tip_x86.dll"      = Join-Path $x86ReleaseDir "cheime_tip.dll"
     "cheime-registered-probe.exe" = Join-Path $releaseDir "cheime-registered-probe.exe"
     "cheime-profile-probe.exe"    = Join-Path $releaseDir "cheime-profile-probe.exe"
 }
@@ -66,23 +79,26 @@ foreach ($name in $artifacts.Keys) {
 Write-Step "Staging guest bundle"
 $bundleDir = Join-Path $StagingRoot "cheime-bundle-$([guid]::NewGuid().ToString('N').Substring(0,8))"
 $binDir    = Join-Path $bundleDir "bin"
+$x86BinDir = Join-Path $binDir "x86"
 $dataDir   = Join-Path $bundleDir "data\dicts"
 $configDir = Join-Path $bundleDir "config"
 
 # Clean previous stage
 if (Test-Path $bundleDir) { Remove-Item -Recurse -Force $bundleDir }
-New-Item -ItemType Directory -Force -Path $binDir, $dataDir, $configDir | Out-Null
+New-Item -ItemType Directory -Force -Path $binDir, $x86BinDir, $dataDir, $configDir | Out-Null
 
 # Copy binaries
 Copy-Item -Force (Join-Path $releaseDir "cheime-engine.exe")          (Join-Path $binDir "cheime-engine.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime-ui.exe")              (Join-Path $binDir "cheime-ui.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime_tip.dll")              (Join-Path $binDir "cheime-tip.dll")
+Copy-Item -Force (Join-Path $x86ReleaseDir "cheime_tip.dll")           (Join-Path $x86BinDir "cheime-tip.dll")
 Copy-Item -Force (Join-Path $releaseDir "cheime-registered-probe.exe") (Join-Path $binDir "cheime-registered-probe.exe")
 Copy-Item -Force (Join-Path $releaseDir "cheime-profile-probe.exe")    (Join-Path $binDir "cheime-profile-probe.exe")
 Copy-Item -Force (Join-Path $repoRoot "assets\windows\*.ico")          $binDir
 
 # Copy dictionary data
 Copy-Item -Force (Join-Path $repoRoot "data\dicts\*") $dataDir
+Copy-Item -Force (Join-Path $repoRoot "data\emoji.txt") (Join-Path $bundleDir "data\emoji.txt")
 Copy-Item -Force (Join-Path $repoRoot "config\ui.yaml") $configDir
 
 # Copy guest scripts
@@ -103,6 +119,7 @@ $stagedFiles = @(
     "bin\cheime-engine.exe",
     "bin\cheime-ui.exe",
     "bin\cheime-tip.dll",
+    "bin\x86\cheime-tip.dll",
     "bin\cheime-registered-probe.exe",
     "bin\cheime-profile-probe.exe",
     "bin\cheime.ico",
@@ -110,6 +127,7 @@ $stagedFiles = @(
     "bin\zh-white.ico",
     "bin\en-black.ico",
     "bin\en-white.ico",
+    "data\emoji.txt",
     "data\dicts\pinyin_small.dict.yaml",
     "config\ui.yaml"
 )

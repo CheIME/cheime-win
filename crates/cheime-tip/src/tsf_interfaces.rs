@@ -5,11 +5,11 @@
 //! One allocation owns every interface header. No TSF activation, edit-session,
 //! pipe, or UI behavior is performed here.
 
-use crate::candidate_window::CandidateWindow;
+use crate::candidate_window::{CandidateWindow, WM_CHEIME_LAYOUT_CHANGE};
 use crate::edit_session::request_guarded_backspace;
 use crate::exports::{decrement_object_count, increment_object_count};
 use crate::io_thread::IoThread;
-use crate::key_handler::{InputMode, KeyAdmission, check_key_with_guard, is_guarded_backspace};
+use crate::key_handler::{InputMode, KeyAdmission, check_key_with_locks, is_guarded_backspace};
 use crate::language_bar::LanguageBarRegistration;
 use crate::rollback_guard::{GuardEvent, monotonic_ms};
 use crate::runtime::{
@@ -23,16 +23,18 @@ use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
-use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState};
 use windows::Win32::UI::TextServices::{
     ITfCompositionSink, ITfCompositionSink_Vtbl, ITfContext, ITfDisplayAttributeProvider,
     ITfDisplayAttributeProvider_Vtbl, ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Vtbl,
     ITfKeystrokeMgr, ITfSource, ITfTextEditSink, ITfTextEditSink_Vtbl, ITfTextInputProcessor,
     ITfTextInputProcessor_Vtbl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Vtbl,
-    ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS,
+    ITfTextLayoutSink, ITfTextLayoutSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
+    ITfThreadMgrEventSink_Vtbl, TF_E_ALREADY_EXISTS, TfLayoutCode,
 };
-use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface, implement};
 
 /// Write a diagnostic line to %TEMP%\cheime-tsf.log.
 pub fn tsf_log(msg: &str) {
@@ -65,8 +67,49 @@ pub const S_OK: HRESULT = HRESULT(0);
 pub const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
 pub const E_INVALIDARG: HRESULT = HRESULT(0x8007_0057u32 as i32);
 pub const E_POINTER: HRESULT = HRESULT(0x8000_4003u32 as i32);
-pub const E_NOTIMPL: HRESULT = HRESULT(0x8000_4001u32 as i32);
 pub const E_UNEXPECTED: HRESULT = HRESULT(0x8000_FFFFu32 as i32);
+
+#[implement(ITfTextLayoutSink)]
+struct TextLayoutNotificationSink {
+    hwnd: HWND,
+}
+
+impl TextLayoutNotificationSink {
+    fn new(hwnd: HWND) -> Self {
+        increment_object_count();
+        Self { hwnd }
+    }
+}
+
+impl Drop for TextLayoutNotificationSink {
+    fn drop(&mut self) {
+        decrement_object_count();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TestedKeyState {
+    key_code: u32,
+    shift: bool,
+    control: bool,
+    alt: bool,
+    caps_lock: bool,
+}
+
+#[allow(non_snake_case)]
+impl ITfTextLayoutSink_Impl for TextLayoutNotificationSink_Impl {
+    fn OnLayoutChange(
+        &self,
+        _context: Option<&ITfContext>,
+        _code: TfLayoutCode,
+        _view: Option<&windows::Win32::UI::TextServices::ITfContextView>,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            let _ = PostMessageW(self.hwnd, WM_CHEIME_LAYOUT_CHANGE, WPARAM(0), LPARAM(0));
+        }
+        Ok(())
+    }
+}
 
 pub const IID_TIP: GUID = ITfTextInputProcessor::IID;
 pub const IID_TIP_EX: GUID = ITfTextInputProcessorEx::IID;
@@ -122,9 +165,11 @@ pub struct ComTip {
     candidate_window: RefCell<Option<CandidateWindow>>,
     language_bar: RefCell<Option<LanguageBarRegistration>>,
     text_edit_subscription: RefCell<Option<(ITfSource, u32)>>,
+    text_layout_subscription: RefCell<Option<(ITfSource, u32, ITfTextLayoutSink)>>,
     suppress_text_edit: Cell<bool>,
     mode: Rc<Cell<InputMode>>,
     shift_armed: Cell<bool>,
+    tested_key_down: Cell<Option<TestedKeyState>>,
     pub has_composition: Cell<bool>,
 }
 
@@ -153,9 +198,11 @@ impl ComTip {
             candidate_window: RefCell::new(None),
             language_bar: RefCell::new(None),
             text_edit_subscription: RefCell::new(None),
+            text_layout_subscription: RefCell::new(None),
             suppress_text_edit: Cell::new(false),
             mode: Rc::new(Cell::new(InputMode::Chinese)),
             shift_armed: Cell::new(false),
+            tested_key_down: Cell::new(None),
             has_composition: Cell::new(false),
         })
     }
@@ -190,6 +237,9 @@ impl ComTip {
 impl Drop for ComTip {
     fn drop(&mut self) {
         if let Some((source, cookie)) = self.text_edit_subscription.get_mut().take() {
+            let _ = unsafe { source.UnadviseSink(cookie) };
+        }
+        if let Some((source, cookie, _sink)) = self.text_layout_subscription.get_mut().take() {
             let _ = unsafe { source.UnadviseSink(cookie) };
         }
         self.language_bar.get_mut().take();
@@ -370,6 +420,7 @@ unsafe extern "system" fn deactivate(this: *mut c_void) -> HRESULT {
     }
     let owner = unsafe { owner_from_primary(this) };
     unsafe { replace_text_edit_subscription(owner, None) };
+    unsafe { replace_text_layout_subscription(owner, None, HWND::default()) };
     let resources = match ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
         state.begin_deactivation()
     }) {
@@ -380,6 +431,7 @@ unsafe extern "system" fn deactivate(this: *mut c_void) -> HRESULT {
         language_bar.take();
     }
     unsafe { (*owner).shift_armed.set(false) };
+    unsafe { (*owner).tested_key_down.set(None) };
     // Shutdown I/O thread and hide candidate window
     if let Ok(mut io_opt) = unsafe { (*owner).io_thread.try_borrow_mut() } {
         if let Some(mut io) = io_opt.take() {
@@ -434,6 +486,7 @@ unsafe extern "system" fn activate_ex(
     };
     tsf_log(&format!("[CheIME] ActivateEx client_id={client_id}"));
     unsafe { (*owner).shift_armed.set(false) };
+    unsafe { (*owner).tested_key_down.set(None) };
 
     let manager = unsafe { ITfThreadMgr::from_raw_borrowed(&thread_mgr) }
         .expect("non-null ITfThreadMgr")
@@ -552,12 +605,28 @@ unsafe extern "system" fn activate_ex(
     let mut channel = TipChannel::new(64);
     let receiver = channel.take_receiver();
     let channel_sender = channel.clone_sender();
+    let composition_sink_raw = unsafe { (*owner).composition_sink_ptr() };
+    let Some(composition_sink) =
+        (unsafe { ITfCompositionSink::from_raw_borrowed(&composition_sink_raw) }).cloned()
+    else {
+        rollback_before_drop(
+            resources,
+            |resources| {
+                let _ = unsafe { resources.source.UnadviseSink(resources.thread_sink_cookie) };
+            },
+            |resources| {
+                let _ = unsafe { resources.keystroke_mgr.UnadviseKeyEventSink(client_id) };
+            },
+        );
+        abort_activation(owner, token);
+        return E_UNEXPECTED;
+    };
     let window_ctx = CandidateWindow::new_context(
         manager_for_window.clone(),
         client_id,
         channel_sender,
         owner,
-        unsafe { (*owner).composition_sink_ptr() },
+        composition_sink,
     );
     let cw = match CandidateWindow::create(window_ctx) {
         Ok(cw) => cw,
@@ -575,6 +644,7 @@ unsafe extern "system" fn activate_ex(
             return E_UNEXPECTED;
         }
     };
+    let candidate_hwnd = cw.hwnd();
 
     let completed = ApartmentState::try_with_owned(
         unsafe { &(*owner).runtime },
@@ -601,6 +671,9 @@ unsafe extern "system" fn activate_ex(
 
     tsf_log("[CheIME] ActivateEx ACCEPTED");
     unsafe { replace_text_edit_subscription(owner, focused_context_for_sink.as_ref()) };
+    unsafe {
+        replace_text_layout_subscription(owner, focused_context_for_sink.as_ref(), candidate_hwnd)
+    };
 
     match LanguageBarRegistration::attach(&manager_for_window, unsafe { (*owner).mode.clone() }) {
         Ok(registration) => {
@@ -614,8 +687,6 @@ unsafe extern "system" fn activate_ex(
     }
 
     // --- I/O and candidate window startup ---
-    let candidate_hwnd = cw.hwnd();
-
     let io = IoThread::spawn(
         receiver.expect("receiver from fresh channel"),
         candidate_hwnd,
@@ -662,6 +733,14 @@ fn should_handle_standalone_shift(
     activated && is_shift_key(key_code) && !control_down && !alt_down
 }
 
+fn caps_lock_is_on() -> bool {
+    (unsafe { GetKeyState(0x14) } & 1) != 0
+}
+
+fn is_letter_key(key_code: u32) -> bool {
+    (0x41..=0x5A).contains(&key_code)
+}
+
 unsafe fn toggle_input_mode(owner: *mut ComTip) {
     let previous = unsafe { (*owner).mode.get() };
     unsafe {
@@ -704,6 +783,16 @@ unsafe extern "system" fn test_key(
     let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
     let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
     let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
+    let caps_lock_on = caps_lock_is_on();
+    unsafe {
+        (*owner).tested_key_down.set(Some(TestedKeyState {
+            key_code,
+            shift: is_shift,
+            control: is_ctrl,
+            alt: is_alt,
+            caps_lock: caps_lock_on,
+        }));
+    }
 
     if is_shift_key(key_code) {
         let activated = ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
@@ -725,7 +814,7 @@ unsafe extern "system" fn test_key(
             ((*owner).mode.get(), (*owner).has_composition.get())
         }))
     }) {
-        Some(Some((activated, (mode, has_comp)))) => check_key_with_guard(
+        Some(Some((activated, (mode, has_comp)))) => check_key_with_locks(
             mode,
             activated,
             key_code,
@@ -734,6 +823,7 @@ unsafe extern "system" fn test_key(
             is_alt,
             has_comp,
             has_rollback_guard,
+            caps_lock_on,
         ),
         _ => KeyAdmission::PassThrough,
     };
@@ -774,9 +864,18 @@ unsafe extern "system" fn key_down(
     }
     let owner = unsafe { owner_from_key(this) };
     let key_code = wparam.0 as u32;
-    let is_shift = unsafe { GetAsyncKeyState(0x10) } < 0;
-    let is_ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
-    let is_alt = unsafe { GetAsyncKeyState(0x12) } < 0;
+    let tested =
+        unsafe { (*owner).tested_key_down.take() }.filter(|tested| tested.key_code == key_code);
+    let (is_shift, is_ctrl, is_alt, caps_lock_on) = tested
+        .map(|tested| (tested.shift, tested.control, tested.alt, tested.caps_lock))
+        .unwrap_or_else(|| {
+            (
+                unsafe { GetAsyncKeyState(0x10) } < 0,
+                unsafe { GetAsyncKeyState(0x11) } < 0,
+                unsafe { GetAsyncKeyState(0x12) } < 0,
+                caps_lock_is_on(),
+            )
+        });
 
     if is_shift_key(key_code) {
         let activated = ApartmentState::try_with(unsafe { &(*owner).runtime }, |state| {
@@ -800,7 +899,7 @@ unsafe extern "system" fn key_down(
             ((*owner).mode.get(), (*owner).has_composition.get())
         }))
     }) {
-        Some(Some((activated, (mode, has_comp)))) => check_key_with_guard(
+        Some(Some((activated, (mode, has_comp)))) => check_key_with_locks(
             mode,
             activated,
             key_code,
@@ -809,6 +908,7 @@ unsafe extern "system" fn key_down(
             is_alt,
             has_comp,
             has_rollback_guard,
+            caps_lock_on,
         ),
         _ => KeyAdmission::PassThrough,
     };
@@ -1013,7 +1113,10 @@ unsafe extern "system" fn key_down(
             if has_rollback_guard {
                 unsafe { disarm_rollback(owner, GuardEvent::Navigation) };
             }
-            if unsafe { (*owner).has_composition.get() } && dismisses_composition(key_code) {
+            let caps_locked_letter = caps_lock_on && is_letter_key(key_code);
+            if unsafe { (*owner).has_composition.get() }
+                && (dismisses_composition(key_code) || caps_locked_letter)
+            {
                 if let Ok(channel) = unsafe { (*owner).channel.try_borrow() } {
                     if let Some(ref channel) = *channel {
                         let _ = channel.try_send(FrontendMessage::UiCommand {
@@ -1194,6 +1297,43 @@ unsafe fn replace_text_edit_subscription(owner: *mut ComTip, context: Option<&IT
     }
 }
 
+unsafe fn replace_text_layout_subscription(
+    owner: *mut ComTip,
+    context: Option<&ITfContext>,
+    hwnd: HWND,
+) {
+    let Ok(mut subscription) = (unsafe { (*owner).text_layout_subscription.try_borrow_mut() })
+    else {
+        return;
+    };
+    if let Some((source, cookie, _sink)) = subscription.take() {
+        let _ = unsafe { source.UnadviseSink(cookie) };
+    }
+    let Some(context) = context else {
+        return;
+    };
+    if hwnd.is_invalid() {
+        return;
+    }
+    let Ok(source) = context.cast::<ITfSource>() else {
+        return;
+    };
+    let sink: ITfTextLayoutSink = TextLayoutNotificationSink::new(hwnd).into();
+    let Ok(unknown) = sink.cast::<IUnknown>() else {
+        return;
+    };
+    if let Ok(cookie) = unsafe { source.AdviseSink(&ITfTextLayoutSink::IID, &unknown) } {
+        *subscription = Some((source, cookie, sink));
+    }
+}
+
+unsafe fn candidate_hwnd(owner: *mut ComTip) -> HWND {
+    unsafe { (*owner).candidate_window.try_borrow() }
+        .ok()
+        .and_then(|window| window.as_ref().map(CandidateWindow::hwnd))
+        .unwrap_or_default()
+}
+
 unsafe fn rollback_guard_matches(owner: *mut ComTip, context_raw: *mut c_void) -> bool {
     let Some(context) = (unsafe { context_from_raw(context_raw) }) else {
         return false;
@@ -1241,16 +1381,15 @@ unsafe fn dispatch_guarded_backspace(owner: *mut ComTip, context_raw: *mut c_voi
         return false;
     }
     let window_context = unsafe { &*window.ctx_ptr };
-    unsafe {
-        request_guarded_backspace(
-            window_context.client_id,
-            &context,
-            &window_context.channel,
-            &window_context.composition,
-            &window_context.rollback_guard,
-            &window_context.rollback_anchor,
-        );
-    }
+    request_guarded_backspace(
+        window_context.client_id,
+        &context,
+        window_context.channel.clone(),
+        window_context.composition.clone(),
+        window_context.rollback_guard.clone(),
+        window_context.rollback_anchor.clone(),
+        window_context.lifetime_alive.clone(),
+    );
     true
 }
 
@@ -1286,6 +1425,13 @@ unsafe fn set_runtime_focus(
         Ok(Ok(old)) => {
             drop(old);
             unsafe { replace_text_edit_subscription(owner, context_for_sink.as_ref()) };
+            unsafe {
+                replace_text_layout_subscription(
+                    owner,
+                    context_for_sink.as_ref(),
+                    candidate_hwnd(owner),
+                )
+            };
             S_OK
         }
         Ok(Err(rejected)) | Err(rejected) => {
@@ -1321,6 +1467,7 @@ unsafe extern "system" fn uninit_document(this: *mut c_void, document: *mut c_vo
         Some(Some(old)) => {
             drop(old);
             unsafe { replace_text_edit_subscription(owner, None) };
+            unsafe { replace_text_layout_subscription(owner, None, HWND::default()) };
             // Hide candidate window when document is uninitialized
             if let Ok(cw) = (*owner).candidate_window.try_borrow() {
                 if let Some(ref cw) = *cw {
@@ -1329,7 +1476,10 @@ unsafe extern "system" fn uninit_document(this: *mut c_void, document: *mut c_vo
             }
             S_OK
         }
-        Some(None) => E_UNEXPECTED,
+        // OnUninitDocumentMgr is a notification for every document manager on
+        // the thread, not only the focused one. Unrelated documents are a
+        // successful no-op.
+        Some(None) => S_OK,
         None => E_UNEXPECTED,
     }
 }
@@ -1380,6 +1530,13 @@ unsafe extern "system" fn push_context(this: *mut c_void, context: *mut c_void) 
         Ok(Ok(old)) => {
             drop(old);
             unsafe { replace_text_edit_subscription(owner, context_for_sink.as_ref()) };
+            unsafe {
+                replace_text_layout_subscription(
+                    owner,
+                    context_for_sink.as_ref(),
+                    candidate_hwnd(owner),
+                )
+            };
             S_OK
         }
         Ok(Err(rejected)) | Err(rejected) => {
@@ -1420,6 +1577,13 @@ unsafe extern "system" fn pop_context(this: *mut c_void, context: *mut c_void) -
         Ok(Ok(old)) => {
             drop(old);
             unsafe { replace_text_edit_subscription(owner, top_for_sink.as_ref()) };
+            unsafe {
+                replace_text_layout_subscription(
+                    owner,
+                    top_for_sink.as_ref(),
+                    candidate_hwnd(owner),
+                )
+            };
             S_OK
         }
         Ok(Err(rejected)) | Err(rejected) => {
@@ -1448,7 +1612,7 @@ unsafe extern "system" fn text_edit_end(
         return E_POINTER;
     }
     let owner = unsafe { owner_from_text_edit(this) };
-    if !unsafe { (*owner).suppress_text_edit.get() } {
+    if !unsafe { (*owner).suppress_text_edit.replace(false) } {
         unsafe { disarm_rollback(owner, GuardEvent::Navigation) };
     }
     S_OK
@@ -1518,8 +1682,9 @@ unsafe extern "system" fn enum_display(_: *mut c_void, out: *mut *mut c_void) ->
     if out.is_null() {
         return E_POINTER;
     }
-    unsafe { *out = null_mut() };
-    E_NOTIMPL
+    let enumerator = crate::display_attribute::create_enumerator();
+    unsafe { *out = enumerator.into_raw() };
+    S_OK
 }
 unsafe extern "system" fn get_display(
     _: *mut c_void,
@@ -1890,8 +2055,10 @@ mod tests {
         let owner = Box::into_raw(ComTip::new());
         let display = unsafe { ComTip::interface(owner, &IID_DA).unwrap() };
         let mut out = dangling_mut::<c_void>();
-        assert_eq!(unsafe { enum_display(display, &mut out) }, E_NOTIMPL);
-        assert!(out.is_null());
+        assert_eq!(unsafe { enum_display(display, &mut out) }, S_OK);
+        assert!(!out.is_null());
+        drop(unsafe { IUnknown::from_raw(out) });
+        out = null_mut();
         assert_eq!(
             unsafe { get_display(display, &IID_DA, &mut out) },
             E_INVALIDARG

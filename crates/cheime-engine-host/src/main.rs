@@ -10,12 +10,12 @@ mod pipe_handle;
 mod server;
 mod session_runner;
 
-use cheime_config::schema::SchemaConfig;
+use cheime_config::schema::{EmojiTranslatorConfig, SchemaConfig, TranslatorConfig};
 use cheime_dictionary::{CompiledIndex, DictCache, DictColumn};
 use cheime_pipeline::learning::LearningService;
 use cheime_user_data::UserStore;
 use parking_lot::Mutex;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn main() {
@@ -76,7 +76,12 @@ fn main() {
             .join("schemas")
             .join("quanpin.yaml")
     });
-    let config = load_config(&config_path);
+    let mut config = load_config(&config_path);
+    configure_emoji_translator(
+        &mut config,
+        &config_path,
+        &data_dir().join("data").join("emoji.txt"),
+    );
 
     let db_path = data_dir().join("user_data.db");
     let user_store =
@@ -144,6 +149,48 @@ engine:
         eprintln!("warning: config load failed ({e}), using minimal config");
         serde_yaml::from_str(fallback).unwrap()
     })
+}
+
+fn configure_emoji_translator(
+    config: &mut SchemaConfig,
+    config_path: &Path,
+    default_emoji_path: &Path,
+) {
+    let mut found = false;
+    for translator in &mut config.engine.translators {
+        let TranslatorConfig::Emoji(emoji) = translator else {
+            continue;
+        };
+        found = true;
+        let configured = PathBuf::from(&emoji.emoji_data);
+        if configured.is_absolute() {
+            continue;
+        }
+
+        let config_relative = config_path
+            .parent()
+            .map_or_else(|| configured.clone(), |parent| parent.join(&configured));
+        let runtime_relative = data_dir().join(&configured);
+        let resolved = if config_relative.is_file() {
+            config_relative
+        } else if runtime_relative.is_file() {
+            runtime_relative
+        } else if default_emoji_path.is_file() {
+            default_emoji_path.to_path_buf()
+        } else {
+            config_relative
+        };
+        emoji.emoji_data = resolved.to_string_lossy().into_owned();
+    }
+
+    if !found {
+        config
+            .engine
+            .translators
+            .push(TranslatorConfig::Emoji(EmojiTranslatorConfig {
+                emoji_data: default_emoji_path.to_string_lossy().into_owned(),
+            }));
+    }
 }
 
 // ── stdin mode ─────────────────────────────────────────────────────
@@ -253,4 +300,94 @@ fn print_usage() {
     eprintln!("  --config PATH Schema config file");
     eprintln!("  --stdin       Run in stdin/stdout JSON mode");
     eprintln!("  --help        Show this help");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cheime_dictionary::DictEntry;
+    use cheime_model::DeploymentGeneration;
+    use cheime_pipeline::InputPipeline;
+    use cheime_pipeline::factory::PipelineFactory;
+
+    #[test]
+    fn missing_schema_translator_gets_runtime_emoji_data() {
+        let mut config = SchemaConfig::default();
+        let emoji_path = PathBuf::from(r"C:\CheIME\data\emoji.txt");
+
+        configure_emoji_translator(
+            &mut config,
+            &PathBuf::from(r"C:\CheIME\config\schema.yaml"),
+            &emoji_path,
+        );
+
+        assert!(config.engine.translators.iter().any(|translator| {
+            matches!(
+                translator,
+                TranslatorConfig::Emoji(emoji) if emoji.emoji_data == emoji_path.to_string_lossy()
+            )
+        }));
+    }
+
+    #[test]
+    fn absolute_custom_emoji_path_is_preserved() {
+        let custom_path = PathBuf::from(r"D:\custom\emoji.txt");
+        let mut config = SchemaConfig::default();
+        config
+            .engine
+            .translators
+            .push(TranslatorConfig::Emoji(EmojiTranslatorConfig {
+                emoji_data: custom_path.to_string_lossy().into_owned(),
+            }));
+
+        configure_emoji_translator(
+            &mut config,
+            &PathBuf::from(r"C:\CheIME\config\schema.yaml"),
+            &PathBuf::from(r"C:\CheIME\data\emoji.txt"),
+        );
+
+        assert!(matches!(
+            &config.engine.translators[0],
+            TranslatorConfig::Emoji(emoji) if emoji.emoji_data == custom_path.to_string_lossy()
+        ));
+    }
+
+    #[test]
+    fn repository_emoji_data_is_loaded_and_ranked_fifth() {
+        let emoji_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("data")
+            .join("emoji.txt");
+        assert!(emoji_path.is_file());
+        let yaml_path = emoji_path.to_string_lossy().replace('\\', "/");
+        let config: SchemaConfig = serde_yaml::from_str(&format!(
+            r#"schema_version: 1
+engine:
+  segmentors:
+    - type: pinyin_syllable
+  translators:
+    - type: table
+      dictionary: fixture
+    - type: emoji
+      emoji_data: '{yaml_path}'
+"#
+        ))
+        .unwrap();
+        let entries = (1..=8)
+            .map(|index| DictEntry {
+                text: format!("word-{index}"),
+                code: String::from("xiao"),
+                weight: Some(100 - index),
+                stem: None,
+            })
+            .collect();
+        let dictionary = Arc::new(CompiledIndex::build(entries, DeploymentGeneration::new(1)));
+        let pipeline = PipelineFactory::build(&config, None, Some(dictionary), None).unwrap();
+
+        let candidates = pipeline.refresh("xiao").unwrap();
+
+        assert!(candidates[4].is_emoji);
+        assert_eq!(candidates[4].text, "😀");
+    }
 }
